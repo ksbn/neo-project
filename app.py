@@ -1,10 +1,10 @@
 import os
-import streamlit as st # type: ignore
-import psycopg
-from dotenv import load_dotenv
+from datetime import date, timedelta
 import pandas as pd
+import psycopg
 import requests
-from datetime import date
+import streamlit as st
+from dotenv import load_dotenv
 
 load_dotenv()
 
@@ -13,7 +13,7 @@ st.set_page_config(page_title="NASA NeoWs Dashboard", page_icon="🌠", layout="
 st.title(" NASA Near Earth Objects (NeoWs) Dashboard")
 st.markdown("Live data pipeline tracker powered by Python, PostgreSQL, and NASA's NeoWs API.")
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300)
 def load_data():
     try:
         conn = psycopg.connect(
@@ -27,11 +27,17 @@ def load_data():
         query = "SELECT neo_reference_id, name, estimated_diameter_min_km, estimated_diameter_max_km, is_potentially_hazardous, close_approach_date, miss_distance_km FROM asteroids ORDER BY close_approach_date DESC;"
         df = pd.read_sql(query, conn)
         conn.close()
-        return df
-    except Exception as e:
-        today = str(date.today())
+        if not df.empty:
+            return df
+    except Exception:
+        pass
+
+    try:
+        end_dt = date.today()
+        start_dt = end_dt - timedelta(days=3)
         api_key = os.getenv("NASA_API_KEY", "DEMO_KEY")
-        url = f"https://api.nasa.gov/neo/rest/v1/feed?start_date={today}&end_date={today}&api_key={api_key}"
+        url = f"https://api.nasa.gov/neo/rest/v1/feed?start_date={start_dt}&end_date={end_dt}&api_key={api_key}"
+        
         resp = requests.get(url, timeout=10).json()
         rows = []
         for day, neos in resp.get("near_earth_objects", {}).items():
@@ -47,6 +53,8 @@ def load_data():
                     "miss_distance_km": float(approach["miss_distance"]["kilometers"])
                 })
         return pd.DataFrame(rows)
+    except Exception:
+        return pd.DataFrame()
 
 df = load_data()
 
@@ -54,7 +62,7 @@ if not df.empty:
     # Metric cards
     col1, col2, col3 = st.columns(3)
     col1.metric("Total Asteroids Tracked", len(df))
-    col2.metric("Potentially Hazardous", len(df[df["is_potentially_hazardous"] == True]))
+    col2.metric("Potentially Hazardous", int(df["is_potentially_hazardous"].sum()))
     col3.metric("Latest Approach Date", str(df["close_approach_date"].max()))
 
     st.subheader("📋 Asteroid Database Records")
@@ -65,4 +73,4 @@ if not df.empty:
 
     st.dataframe(df, use_container_width=True)
 else:
-    st.warning("No data found in database yet. Make sure your Docker container is running and you have executed `python pipeline.py`!")
+    st.warning("Unable to fetch asteroid data from database or NASA API right now. Please check your network or API limits.")
