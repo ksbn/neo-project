@@ -1,10 +1,10 @@
-# 🌠 NASA NeoWs Data Pipeline
+# NASA NeoWs Data Pipeline
 
 A robust, containerized, and idempotent data pipeline that fetches Near Earth Object (NeoWs) data from NASA's public API, validates it via Pydantic models, and safely ingests/upserts records into a PostgreSQL database.
 
 ---
 
-## 🛠️ Tech Stack
+## Tech Stack
 * **Language:** Python 3.14 (`requests`, `pydantic`, `psycopg`, `python-dotenv`)
 * **Database:** PostgreSQL 15 (Dockerized)
 * **Testing:** `pytest`
@@ -12,7 +12,7 @@ A robust, containerized, and idempotent data pipeline that fetches Near Earth Ob
 
 ---
 
-## 🚀 Quick Start Guide
+## Quick Start Guide
 
 ### 1. Clone & Configure Environment
 Clone the repository and copy the example environment file:
