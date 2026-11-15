@@ -4,7 +4,7 @@ from datetime import date, timedelta
 import pandas as pd
 import psycopg
 import requests
-import streamlit as st
+import streamlit as st # pyright: ignore[reportMissingImports]
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -32,12 +32,11 @@ def _normalize(df: pd.DataFrame) -> pd.DataFrame:
     for col in NUMERIC_COLUMNS:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df["is_potentially_hazardous"] = df["is_potentially_hazardous"].fillna(False).astype(bool)
-    df["close_approach_date"] = pd.to_datetime(df["close_approach_date"], errors="coerce").dt.date
+    df["close_approach_date"] = pd.to_datetime(df["close_approach_date"], errors="coerce").dt.date # pyright: ignore[reportAttributeAccessIssue]
     return df
 
 
 def load_from_db() -> pd.DataFrame:
-    query = f"SELECT {', '.join(COLUMNS)} FROM asteroids ORDER BY close_approach_date DESC;"
     with psycopg.connect(
         host=os.getenv("DB_HOST", "localhost"),
         dbname=os.getenv("DB_NAME", "neo_db"),
@@ -45,10 +44,15 @@ def load_from_db() -> pd.DataFrame:
         password=os.getenv("DB_PASSWORD", "postgres"),
         port=os.getenv("DB_PORT", "5432"),
         connect_timeout=3,
-    ) as conn, conn.cursor() as cur:
-        cur.execute(query)
-        rows = cur.fetchall()
-    return pd.DataFrame(rows, columns=COLUMNS)
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT neo_reference_id, name, estimated_diameter_min_km, "
+                "estimated_diameter_max_km, is_potentially_hazardous, "
+                "close_approach_date, miss_distance_km FROM asteroids;"
+            )
+            rows = cur.fetchall()
+            return pd.DataFrame(rows, columns=COLUMNS)
 
 
 def load_from_api() -> pd.DataFrame:
