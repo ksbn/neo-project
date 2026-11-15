@@ -3,12 +3,14 @@ import streamlit as st # type: ignore
 import psycopg
 from dotenv import load_dotenv
 import pandas as pd
+import requests
+from datetime import date
 
 load_dotenv()
 
 st.set_page_config(page_title="NASA NeoWs Dashboard", page_icon="🌠", layout="wide")
 
-st.title("🌠 NASA Near Earth Objects (NeoWs) Dashboard")
+st.title(" NASA Near Earth Objects (NeoWs) Dashboard")
 st.markdown("Live data pipeline tracker powered by Python, PostgreSQL, and NASA's NeoWs API.")
 
 @st.cache_data(ttl=60)
@@ -19,15 +21,32 @@ def load_data():
             dbname=os.getenv("DB_NAME", "neo_db"),
             user=os.getenv("DB_USER", "postgres"),
             password=os.getenv("DB_PASSWORD", "postgres"),
-            port=os.getenv("DB_PORT", "5432")
+            port=os.getenv("DB_PORT", "5432"),
+            connect_timeout=3
         )
         query = "SELECT neo_reference_id, name, estimated_diameter_min_km, estimated_diameter_max_km, is_potentially_hazardous, close_approach_date, miss_distance_km FROM asteroids ORDER BY close_approach_date DESC;"
         df = pd.read_sql(query, conn)
         conn.close()
         return df
     except Exception as e:
-        st.error(f"Database connection error: {e}")
-        return pd.DataFrame()
+        today = str(date.today())
+        api_key = os.getenv("NASA_API_KEY", "DEMO_KEY")
+        url = f"https://api.nasa.gov/neo/rest/v1/feed?start_date={today}&end_date={today}&api_key={api_key}"
+        resp = requests.get(url, timeout=10).json()
+        rows = []
+        for day, neos in resp.get("near_earth_objects", {}).items():
+            for neo in neos:
+                approach = neo["close_approach_data"][0]
+                rows.append({
+                    "neo_reference_id": neo["neo_reference_id"],
+                    "name": neo["name"],
+                    "estimated_diameter_min_km": neo["estimated_diameter"]["kilometers"]["estimated_diameter_min"],
+                    "estimated_diameter_max_km": neo["estimated_diameter"]["kilometers"]["estimated_diameter_max"],
+                    "is_potentially_hazardous": neo["is_potentially_hazardous_asteroid"],
+                    "close_approach_date": approach["close_approach_date"],
+                    "miss_distance_km": float(approach["miss_distance"]["kilometers"])
+                })
+        return pd.DataFrame(rows)
 
 df = load_data()
 
