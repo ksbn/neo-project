@@ -1,5 +1,6 @@
 import os
 from datetime import date, timedelta
+
 import pandas as pd
 import psycopg
 import requests
@@ -10,67 +11,152 @@ load_dotenv()
 
 st.set_page_config(page_title="NASA NeoWs Dashboard", page_icon="🌠", layout="wide")
 
-st.title(" NASA Near Earth Objects (NeoWs) Dashboard")
+st.title("🌠 NASA Near Earth Objects (NeoWs) Dashboard")
 st.markdown("Live data pipeline tracker powered by Python, PostgreSQL, and NASA's NeoWs API.")
 
-@st.cache_data(ttl=300)
+COLUMNS = [
+    "neo_reference_id",
+    "name",
+    "estimated_diameter_min_km",
+    "estimated_diameter_max_km",
+    "is_potentially_hazardous",
+    "close_approach_date",
+    "miss_distance_km",
+]
+NUMERIC_COLUMNS = ["estimated_diameter_min_km", "estimated_diameter_max_km", "miss_distance_km"]
+
+
+def _normalize(df: pd.DataFrame) -> pd.DataFrame:
+    """Give both data sources the same dtypes (Postgres NUMERIC arrives as Decimal objects)."""
+    df = df.reindex(columns=COLUMNS)
+    for col in NUMERIC_COLUMNS:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["is_potentially_hazardous"] = df["is_potentially_hazardous"].fillna(False).astype(bool)
+    df["close_approach_date"] = pd.to_datetime(df["close_approach_date"], errors="coerce").dt.date
+    return df
+
+
+def load_from_db() -> pd.DataFrame:
+    query = f"SELECT {', '.join(COLUMNS)} FROM asteroids ORDER BY close_approach_date DESC;"
+    with psycopg.connect(
+        host=os.getenv("DB_HOST", "localhost"),
+        dbname=os.getenv("DB_NAME", "neo_db"),
+        user=os.getenv("DB_USER", "postgres"),
+        password=os.getenv("DB_PASSWORD", "postgres"),
+        port=os.getenv("DB_PORT", "5432"),
+        connect_timeout=3,
+    ) as conn, conn.cursor() as cur:
+        cur.execute(query)
+        rows = cur.fetchall()
+    return pd.DataFrame(rows, columns=COLUMNS)
+
+
+def load_from_api() -> pd.DataFrame:
+    end_dt = date.today()
+    start_dt = end_dt - timedelta(days=3)
+    resp = requests.get(
+        "https://api.nasa.gov/neo/rest/v1/feed",
+        params={
+            "start_date": start_dt.isoformat(),
+            "end_date": end_dt.isoformat(),
+            "api_key": os.getenv("NASA_API_KEY", "DEMO_KEY"),
+        },
+        timeout=15,
+    )
+    resp.raise_for_status()
+
+    rows = []
+    for neos in resp.json().get("near_earth_objects", {}).values():
+        for neo in neos:
+            approaches = neo.get("close_approach_data") or [{}]
+            approach = approaches[0]
+            diameter = neo.get("estimated_diameter", {}).get("kilometers", {})
+            rows.append({
+                "neo_reference_id": neo.get("neo_reference_id"),
+                "name": neo.get("name"),
+                "estimated_diameter_min_km": diameter.get("estimated_diameter_min"),
+                "estimated_diameter_max_km": diameter.get("estimated_diameter_max"),
+                "is_potentially_hazardous": neo.get("is_potentially_hazardous_asteroid", False),
+                "close_approach_date": approach.get("close_approach_date"),
+                "miss_distance_km": approach.get("miss_distance", {}).get("kilometers"),
+            })
+    df = pd.DataFrame(rows, columns=COLUMNS)
+    return df.sort_values("close_approach_date", ascending=False)
+
+
+@st.cache_data(ttl=300, show_spinner="Loading asteroid data...")
 def load_data():
+    """Returns (dataframe, source_label, list_of_error_messages)."""
+    errors = []
     try:
-        conn = psycopg.connect(
-            host=os.getenv("DB_HOST", "localhost"),
-            dbname=os.getenv("DB_NAME", "neo_db"),
-            user=os.getenv("DB_USER", "postgres"),
-            password=os.getenv("DB_PASSWORD", "postgres"),
-            port=os.getenv("DB_PORT", "5432"),
-            connect_timeout=3
-        )
-        query = "SELECT neo_reference_id, name, estimated_diameter_min_km, estimated_diameter_max_km, is_potentially_hazardous, close_approach_date, miss_distance_km FROM asteroids ORDER BY close_approach_date DESC;"
-        df = pd.read_sql(query, conn)
-        conn.close()
+        df = load_from_db()
         if not df.empty:
-            return df
-    except Exception:
-        pass
+            return _normalize(df), "PostgreSQL database", errors
+        errors.append("Database is reachable but the `asteroids` table is empty (run pipeline.py).")
+    except Exception as e:
+        errors.append(f"Database unavailable: {type(e).__name__}: {e}")
 
     try:
-        end_dt = date.today()
-        start_dt = end_dt - timedelta(days=3)
-        api_key = os.getenv("NASA_API_KEY", "DEMO_KEY")
-        url = f"https://api.nasa.gov/neo/rest/v1/feed?start_date={start_dt}&end_date={end_dt}&api_key={api_key}"
-        
-        resp = requests.get(url, timeout=10).json()
-        rows = []
-        for day, neos in resp.get("near_earth_objects", {}).items():
-            for neo in neos:
-                approach = neo["close_approach_data"][0]
-                rows.append({
-                    "neo_reference_id": neo["neo_reference_id"],
-                    "name": neo["name"],
-                    "estimated_diameter_min_km": neo["estimated_diameter"]["kilometers"]["estimated_diameter_min"],
-                    "estimated_diameter_max_km": neo["estimated_diameter"]["kilometers"]["estimated_diameter_max"],
-                    "is_potentially_hazardous": neo["is_potentially_hazardous_asteroid"],
-                    "close_approach_date": approach["close_approach_date"],
-                    "miss_distance_km": float(approach["miss_distance"]["kilometers"])
-                })
-        return pd.DataFrame(rows)
-    except Exception:
-        return pd.DataFrame()
+        df = load_from_api()
+        if not df.empty:
+            return _normalize(df), "NASA NeoWs API (live fallback)", errors
+        errors.append("NASA API returned no asteroids for the selected dates.")
+    except Exception as e:
+        errors.append(f"NASA API request failed: {type(e).__name__}: {e}")
 
-df = load_data()
+    return pd.DataFrame(columns=COLUMNS), None, errors
 
-if not df.empty:
-    # Metric cards
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Total Asteroids Tracked", len(df))
-    col2.metric("Potentially Hazardous", int(df["is_potentially_hazardous"].sum()))
-    col3.metric("Latest Approach Date", str(df["close_approach_date"].max()))
 
-    st.subheader("📋 Asteroid Database Records")
-    
-    search_query = st.text_input("Search asteroid by name:", "")
-    if search_query:
-        df = df[df["name"].str.contains(search_query, case=False, na=False)]
+df, source, errors = load_data()
 
-    st.dataframe(df, use_container_width=True)
-else:
-    st.warning("Unable to fetch asteroid data from database or NASA API right now. Please check your network or API limits.")
+with st.sidebar:
+    st.header("Data source")
+    if source:
+        st.success(source)
+    if st.button("🔄 Refresh data"):
+        load_data.clear()
+        st.rerun()
+    if errors:
+        with st.expander("Diagnostics", expanded=source is None):
+            for msg in errors:
+                st.caption(msg)
+
+if df.empty:
+    st.warning(
+        "Unable to fetch asteroid data from the database or the NASA API right now. "
+        "Check the Diagnostics panel in the sidebar for details."
+    )
+    st.stop()
+
+col1, col2, col3 = st.columns(3)
+col1.metric("Total Asteroids Tracked", len(df))
+col2.metric("Potentially Hazardous", int(df["is_potentially_hazardous"].sum()))
+latest = df["close_approach_date"].max()
+col3.metric("Latest Approach Date", str(latest) if pd.notna(latest) else "—")
+
+st.subheader("📋 Asteroid Records")
+
+search_query = st.text_input("Search asteroid by name:", "")
+hazardous_only = st.checkbox("Show only potentially hazardous asteroids")
+
+view = df
+if search_query:
+    view = view[view["name"].str.contains(search_query, case=False, na=False, regex=False)]
+if hazardous_only:
+    view = view[view["is_potentially_hazardous"]]
+
+st.caption(f"Showing {len(view)} of {len(df)} asteroids")
+st.dataframe(
+    view,
+    width="stretch",
+    hide_index=True,
+    column_config={
+        "neo_reference_id": "NEO ID",
+        "name": "Name",
+        "estimated_diameter_min_km": st.column_config.NumberColumn("Min diameter (km)", format="%.3f"),
+        "estimated_diameter_max_km": st.column_config.NumberColumn("Max diameter (km)", format="%.3f"),
+        "is_potentially_hazardous": st.column_config.CheckboxColumn("Hazardous"),
+        "close_approach_date": st.column_config.DateColumn("Close approach"),
+        "miss_distance_km": st.column_config.NumberColumn("Miss distance (km)", format="%,.0f"),
+    },
+)
