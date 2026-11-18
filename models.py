@@ -5,7 +5,7 @@ Two layers of models:
 * **Raw models** (``NearEarthObject`` and its children) mirror the JSON returned
   by ``/feed``. Numeric strings such as ``"12.345"`` are coerced to ``Decimal``.
 * **``AsteroidRecord``** is the flattened, validated row that maps 1:1 onto the
-  ``asteroids`` table in ``schema.sql``.
+  ``asteroids`` table defined in ``db/migrations``.
 
 ``parse_feed`` validates each asteroid independently, so one malformed object
 is reported and skipped instead of failing the whole batch.
@@ -25,6 +25,24 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 logger = logging.getLogger(__name__)
 
 
+def _numeric_limit(precision: int, scale: int) -> Decimal:
+    """Smallest absolute value that overflows a PostgreSQL ``NUMERIC(precision, scale)`` column.
+
+    Postgres rounds extra decimal places away (so those are fine) but rejects
+    values with too many integer digits, failing the whole insert batch.
+    Bounding them here rejects just the offending asteroid instead.
+    Values are rounded half-up to ``scale`` digits, hence the ``0.5`` offset.
+    """
+    return Decimal(10) ** (precision - scale) - Decimal("0.5") * Decimal(10) ** -scale
+
+
+# Keep in sync with the column types in db/migrations.
+DIAMETER_KM_LIMIT = _numeric_limit(14, 6)  # estimated_diameter_*_km NUMERIC(14, 6)
+VELOCITY_KM_S_LIMIT = _numeric_limit(14, 6)  # relative_velocity_km_s   NUMERIC(14, 6)
+MISS_DISTANCE_KM_LIMIT = _numeric_limit(20, 3)  # miss_distance_km      NUMERIC(20, 3)
+MAGNITUDE_LIMIT = _numeric_limit(6, 3)  # absolute_magnitude_h          NUMERIC(6, 3)
+
+
 class _NasaModel(BaseModel):
     """Base model: ignore fields we don't use, strip strings, immutable instances."""
 
@@ -39,8 +57,8 @@ class _NasaModel(BaseModel):
 class DiameterRange(_NasaModel):
     """Min/max estimated diameter in a single unit."""
 
-    estimated_diameter_min: Decimal = Field(ge=0)
-    estimated_diameter_max: Decimal = Field(ge=0)
+    estimated_diameter_min: Decimal = Field(ge=0, lt=DIAMETER_KM_LIMIT)
+    estimated_diameter_max: Decimal = Field(ge=0, lt=DIAMETER_KM_LIMIT)
 
     @model_validator(mode="after")
     def _min_not_above_max(self) -> Self:
@@ -56,11 +74,11 @@ class EstimatedDiameter(_NasaModel):
 
 
 class RelativeVelocity(_NasaModel):
-    kilometers_per_second: Decimal = Field(ge=0)
+    kilometers_per_second: Decimal = Field(ge=0, lt=VELOCITY_KM_S_LIMIT)
 
 
 class MissDistance(_NasaModel):
-    kilometers: Decimal = Field(ge=0)
+    kilometers: Decimal = Field(ge=0, lt=MISS_DISTANCE_KM_LIMIT)
 
 
 class CloseApproach(_NasaModel):
@@ -78,7 +96,7 @@ class NearEarthObject(_NasaModel):
     neo_reference_id: str = Field(min_length=1)
     name: str = Field(min_length=1)
     nasa_jpl_url: str | None = None
-    absolute_magnitude_h: Decimal | None = None
+    absolute_magnitude_h: Decimal | None = Field(default=None, gt=-MAGNITUDE_LIMIT, lt=MAGNITUDE_LIMIT)
     estimated_diameter: EstimatedDiameter | None = None
     is_potentially_hazardous_asteroid: bool
     is_sentry_object: bool = False
@@ -169,6 +187,8 @@ class ParseResult:
     records: list[AsteroidRecord] = field(default_factory=list)
     invalid: list[InvalidObject] = field(default_factory=list)
     element_count: int = 0
+    # Dates present as keys in near_earth_objects (used to detect missing days).
+    feed_dates: frozenset[date] = frozenset()
 
 
 def _summarize(exc: ValidationError) -> str:
@@ -217,4 +237,9 @@ def parse_feed(payload: Mapping[str, Any]) -> ParseResult:
     if seen != feed.element_count:
         logger.warning("Feed element_count is %d but %d objects were present", feed.element_count, seen)
 
-    return ParseResult(records=list(latest.values()), invalid=invalid, element_count=seen)
+    return ParseResult(
+        records=list(latest.values()),
+        invalid=invalid,
+        element_count=seen,
+        feed_dates=frozenset(feed.near_earth_objects),
+    )
