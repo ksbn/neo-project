@@ -1,7 +1,13 @@
--- Schema for NASA NeoWs (Near Earth Object Web Service) data.
--- Executed automatically by the postgres image on first startup
--- (mounted into /docker-entrypoint-initdb.d/).
+-- Initial schema for NASA NeoWs (Near Earth Object Web Service) data.
+--
+-- This is the original schema.sql, unchanged. Its IF NOT EXISTS clauses make it
+-- safe to apply to a database that was created by the old
+-- /docker-entrypoint-initdb.d mount: dbmate just records it as applied.
+--
+-- Never edit this file once applied; add a new migration instead:
+--   docker compose run --rm migrate new <description>
 
+-- migrate:up
 CREATE TABLE IF NOT EXISTS asteroids (
     -- NASA reference ID; primary key enables idempotent upserts:
     --   INSERT ... ON CONFLICT (neo_reference_id) DO UPDATE SET ...
@@ -35,3 +41,6 @@ CREATE INDEX IF NOT EXISTS idx_asteroids_close_approach_date
 
 CREATE INDEX IF NOT EXISTS idx_asteroids_hazardous
     ON asteroids (is_potentially_hazardous);
+
+-- migrate:down
+DROP TABLE IF EXISTS asteroids;

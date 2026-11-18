@@ -21,6 +21,8 @@ from typing import Any, Final, Self
 import requests
 from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
+from urllib3.exceptions import MaxRetryError
+from urllib3.exceptions import TimeoutError as Urllib3TimeoutError
 from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
@@ -31,6 +33,8 @@ MAX_FEED_DAYS: Final = 7
 # (connect timeout, read timeout) in seconds.
 DEFAULT_TIMEOUT: Final = (5.0, 30.0)
 RETRY_STATUS_CODES: Final = frozenset({429, 500, 502, 503, 504})
+# Upper bound on a server-supplied Retry-After; urllib3's own default is 6 hours.
+MAX_RETRY_AFTER_SECONDS: Final = 60.0
 
 
 class NasaApiError(RuntimeError):
@@ -59,9 +63,21 @@ def date_chunks(start_date: date, end_date: date, max_days: int = MAX_FEED_DAYS)
         chunk_start = chunk_end + timedelta(days=1)
 
 
+class _CappedRetry(Retry):
+    """Retry policy that never sleeps longer than MAX_RETRY_AFTER_SECONDS for a Retry-After header.
+
+    Without the cap a misbehaving or rate-limiting server could stall the
+    pipeline for hours. urllib3 creates follow-up instances via ``type(self)``,
+    so the subclass survives across attempts.
+    """
+
+    def parse_retry_after(self, retry_after: str) -> float:
+        return min(super().parse_retry_after(retry_after), MAX_RETRY_AFTER_SECONDS)
+
+
 def _build_session(max_retries: int, backoff_factor: float) -> requests.Session:
     """Create a session that retries idempotent GETs with exponential backoff."""
-    retry = Retry(
+    retry = _CappedRetry(
         total=max_retries,
         connect=max_retries,
         read=max_retries,
@@ -74,10 +90,26 @@ def _build_session(max_retries: int, backoff_factor: float) -> requests.Session:
         # report the API's own error message.
         raise_on_status=False,
     )
+    adapter = HTTPAdapter(max_retries=retry)
     session = requests.Session()
-    session.mount("https://", HTTPAdapter(max_retries=retry))
+    # Mount for both schemes so a plain-http base_url (e.g. a local test server) retries too.
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
     session.headers.update({"Accept": "application/json", "User-Agent": "neo-pipeline/1.0"})
     return session
+
+
+def _is_timeout(exc: requests.RequestException) -> bool:
+    """True if ``exc`` was ultimately caused by a connect or read timeout.
+
+    Once urllib3 exhausts its retries on read timeouts, requests raises a plain
+    ``ConnectionError`` wrapping ``MaxRetryError(reason=ReadTimeoutError)``
+    rather than ``requests.Timeout``, so the cause has to be unwrapped.
+    """
+    if isinstance(exc, requests.Timeout):
+        return True
+    inner = exc.args[0] if exc.args else None
+    return isinstance(inner, MaxRetryError) and isinstance(inner.reason, Urllib3TimeoutError)
 
 
 def _error_detail(response: requests.Response) -> str:
@@ -185,15 +217,24 @@ class NeoWsClient:
 
         try:
             response = self._session.get(url, params=params, timeout=self._timeout)
-        except requests.Timeout as exc:
-            raise NasaApiError(f"Timed out calling NeoWs /{path} (after retries)") from exc
         except requests.RequestException as exc:
+            if _is_timeout(exc):
+                raise NasaApiError(
+                    f"Timed out calling NeoWs /{path} after retries "
+                    f"(connect {self._timeout[0]:g}s / read {self._timeout[1]:g}s per attempt)"
+                ) from exc
             raise NasaApiError(f"Network error calling NeoWs /{path}: {exc}") from exc
 
         remaining = response.headers.get("X-RateLimit-Remaining")
         if remaining is not None:
             logger.debug("NASA API rate limit remaining: %s", remaining)
 
+        if response.status_code == 429:
+            raise NasaApiError(
+                f"NeoWs /{path} rate limit exceeded (HTTP 429) after retries. DEMO_KEY allows only a few "
+                "requests per hour; set a personal NASA_API_KEY from https://api.nasa.gov in .env",
+                status_code=429,
+            )
         if not response.ok:
             raise NasaApiError(
                 f"NeoWs /{path} returned HTTP {response.status_code}: {_error_detail(response)}",

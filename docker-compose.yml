@@ -11,8 +11,6 @@ services:
       - "${DB_PORT:-5432}:5432"
     volumes:
       - neo_pgdata:/var/lib/postgresql/data
-      # Runs only when the data volume is empty (first startup).
-      - ./schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
     healthcheck:
       # $$ escapes to the container's own env vars rather than compose interpolation.
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
@@ -20,6 +18,26 @@ services:
       timeout: 5s
       retries: 10
       start_period: 10s
+
+  # One-shot job: applies any pending files in db/migrations, records them in
+  # the schema_migrations table, then exits. Runs on every `docker compose up`.
+  #   docker compose run --rm migrate status   # list applied/pending
+  #   docker compose run --rm migrate new add_x  # create a new migration file
+  migrate:
+    image: ghcr.io/amacneil/dbmate:2.37.0
+    environment:
+      # URL-encode DB_PASSWORD in .env if it contains characters like @ : / ?
+      DATABASE_URL: "postgres://${DB_USER}:${DB_PASSWORD}@db:5432/${DB_NAME}?sslmode=disable"
+      DBMATE_MIGRATIONS_DIR: /db/migrations
+      DBMATE_NO_DUMP_SCHEMA: "true"
+      DBMATE_WAIT: "true"
+    volumes:
+      - ./db/migrations:/db/migrations
+    command: ["up"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
 
 volumes:
   neo_pgdata:

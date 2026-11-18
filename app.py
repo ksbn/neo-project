@@ -2,10 +2,12 @@ import os
 from datetime import date, timedelta
 
 import pandas as pd
-import psycopg
-import requests
 import streamlit as st # pyright: ignore[reportMissingImports]
 from dotenv import load_dotenv
+
+from client import NeoWsClient
+from database import DbConfig, connect
+from models import parse_feed
 
 load_dotenv()
 
@@ -37,14 +39,8 @@ def _normalize(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def load_from_db() -> pd.DataFrame:
-    with psycopg.connect(
-        host=os.getenv("DB_HOST", "localhost"),
-        dbname=os.getenv("DB_NAME", "neo_db"),
-        user=os.getenv("DB_USER", "postgres"),
-        password=os.getenv("DB_PASSWORD", "postgres"),
-        port=os.getenv("DB_PORT", "5432"),
-        connect_timeout=3,
-    ) as conn:
+    # Same settings and validation as the pipeline (raises ValueError if .env is incomplete).
+    with connect(DbConfig.from_env(), connect_timeout=3) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT neo_reference_id, name, estimated_diameter_min_km, "
@@ -56,35 +52,19 @@ def load_from_db() -> pd.DataFrame:
 
 
 def load_from_api() -> pd.DataFrame:
+    """Fetch the last few days live, through the same client and validation as the pipeline.
+
+    The shared client sends the API key in a header, so error messages shown in
+    the Diagnostics panel never contain it.
+    """
     end_dt = date.today()
     start_dt = end_dt - timedelta(days=3)
-    resp = requests.get(
-        "https://api.nasa.gov/neo/rest/v1/feed",
-        params={
-            "start_date": start_dt.isoformat(),
-            "end_date": end_dt.isoformat(),
-            "api_key": os.getenv("NASA_API_KEY", "DEMO_KEY"),
-        },
-        timeout=15,
-    )
-    resp.raise_for_status()
+    api_key = os.getenv("NASA_API_KEY") or "DEMO_KEY"
+    # Fewer retries and a shorter read timeout than the batch pipeline: someone is waiting on the page.
+    with NeoWsClient(api_key=api_key, timeout=(5.0, 15.0), max_retries=2) as client:
+        result = parse_feed(client.get_feed(start_dt, end_dt))
 
-    rows = []
-    for neos in resp.json().get("near_earth_objects", {}).values():
-        for neo in neos:
-            approaches = neo.get("close_approach_data") or [{}]
-            approach = approaches[0]
-            diameter = neo.get("estimated_diameter", {}).get("kilometers", {})
-            rows.append({
-                "neo_reference_id": neo.get("neo_reference_id"),
-                "name": neo.get("name"),
-                "estimated_diameter_min_km": diameter.get("estimated_diameter_min"),
-                "estimated_diameter_max_km": diameter.get("estimated_diameter_max"),
-                "is_potentially_hazardous": neo.get("is_potentially_hazardous_asteroid", False),
-                "close_approach_date": approach.get("close_approach_date"),
-                "miss_distance_km": approach.get("miss_distance", {}).get("kilometers"),
-            })
-    df = pd.DataFrame(rows, columns=COLUMNS)
+    df = pd.DataFrame([record.model_dump(include=set(COLUMNS)) for record in result.records], columns=COLUMNS)
     return df.sort_values("close_approach_date", ascending=False)
 
 
