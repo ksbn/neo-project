@@ -2,6 +2,15 @@
 
 A robust, containerized, and idempotent data pipeline that fetches Near Earth Object (NeoWs) data from NASA's public API, validates it via Pydantic models, and safely ingests/upserts records into a PostgreSQL database.
 
+## Why NASA NeoWs?
+
+NASA’s Near Earth Object (NeoWs) API is an absolute goldmine for building unique, visually stunning, and technically challenging engineering projects. Unlike standard financial or weather datasets, space data brings real-world stakes, massive physical scales, and rich multi-dimensional metrics straight to my software.
+
+By combining this API with a robust data pipeline and automated storage layer, I can unlock endless possibilities:
+- **Rich Cosmic Attributes:** Every record includes real-world telemetry—such as relative velocity, precise physical dimensions, miss distances measured in Lunar Distances (LD), and critical hazard classification flags.
+- **Full-Stack Extensibility:** Move effortlessly from backend data engineering (idempotent PostgreSQL upserts, rate-limit resilience, semantic exit codes) to frontend visualization (sci-fi planetary defense control rooms, risk-matrix analytics, and 3D orbital flight paths).
+- **High-Impact Portfolio Piece:** It bridges the gap between raw data ingestion and compelling consumer or B2B applications, demonstrating end-to-end system design capability.
+
 ---
 
 ## Tech Stack
