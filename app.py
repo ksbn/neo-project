@@ -13,7 +13,7 @@ load_dotenv()
 
 st.set_page_config(page_title="NASA NeoWs Dashboard", page_icon="🌠", layout="wide")
 
-st.title("🌠 NASA Near Earth Objects (NeoWs) Dashboard")
+st.title("NASA Near Earth Objects (NeoWs) Dashboard")
 st.markdown("Live data pipeline tracker powered by Python, PostgreSQL, and NASA's NeoWs API.")
 
 COLUMNS = [
