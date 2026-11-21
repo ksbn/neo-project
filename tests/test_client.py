@@ -123,6 +123,21 @@ def test_persistent_429_explains_rate_limit(client):
     assert exc.value.status_code == 429
 
 
+def test_dns_failure_is_not_reported_as_timeout():
+    # .invalid is reserved (RFC 2606) and never resolves.
+    with NeoWsClient(api_key="k", base_url="https://api.nasa.invalid/neo", max_retries=1, backoff_factor=0) as c:
+        with pytest.raises(NasaApiError, match="Could not resolve api.nasa.invalid") as exc:
+            c.get_feed(D1, D1)
+    assert "Timed out" not in str(exc.value)
+
+
+def test_refused_connection_is_not_reported_as_timeout():
+    with NeoWsClient(api_key="k", base_url="http://127.0.0.1:1", max_retries=1, backoff_factor=0) as c:
+        with pytest.raises(NasaApiError, match="Network error") as exc:
+            c.get_feed(D1, D1)
+    assert "Timed out" not in str(exc.value)
+
+
 @responses.activate
 def test_connection_error(client):
     responses.get(FEED, body=requests.ConnectionError("boom"))

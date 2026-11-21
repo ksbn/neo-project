@@ -17,11 +17,12 @@ from collections.abc import Iterator
 from datetime import date, timedelta
 from types import TracebackType
 from typing import Any, Final, Self
+from urllib.parse import urlsplit
 
 import requests
 from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
-from urllib3.exceptions import MaxRetryError
+from urllib3.exceptions import MaxRetryError, NameResolutionError, NewConnectionError
 from urllib3.exceptions import TimeoutError as Urllib3TimeoutError
 from urllib3.util.retry import Retry
 
@@ -108,8 +109,16 @@ def _is_timeout(exc: requests.RequestException) -> bool:
     """
     if isinstance(exc, requests.Timeout):
         return True
+    reason = _retry_reason(exc)
+    # urllib3 makes NewConnectionError (refused connection, failed DNS lookup)
+    # a subclass of ConnectTimeoutError for backwards compatibility; it is not a timeout.
+    return isinstance(reason, Urllib3TimeoutError) and not isinstance(reason, NewConnectionError)
+
+
+def _retry_reason(exc: requests.RequestException) -> BaseException | None:
+    """The underlying urllib3 error that made the final retry fail, if any."""
     inner = exc.args[0] if exc.args else None
-    return isinstance(inner, MaxRetryError) and isinstance(inner.reason, Urllib3TimeoutError)
+    return inner.reason if isinstance(inner, MaxRetryError) else None
 
 
 def _error_detail(response: requests.Response) -> str:
@@ -222,6 +231,11 @@ class NeoWsClient:
                 raise NasaApiError(
                     f"Timed out calling NeoWs /{path} after retries "
                     f"(connect {self._timeout[0]:g}s / read {self._timeout[1]:g}s per attempt)"
+                ) from exc
+            if isinstance(_retry_reason(exc), NameResolutionError):
+                host = urlsplit(url).hostname
+                raise NasaApiError(
+                    f"Could not resolve {host} after retries; is the internet connection up?"
                 ) from exc
             raise NasaApiError(f"Network error calling NeoWs /{path}: {exc}") from exc
 

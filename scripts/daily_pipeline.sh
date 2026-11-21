@@ -12,6 +12,17 @@ cd "$PROJECT_DIR"
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') daily_pipeline: $*"; }
 
+# After waking from sleep the network can take a while to come back.
+# Wait up to 10 minutes for NASA to be reachable instead of failing immediately.
+for _ in $(seq 1 40); do
+    curl -s -o /dev/null --max-time 10 https://api.nasa.gov && break
+    sleep 15
+done
+if ! curl -s -o /dev/null --max-time 10 https://api.nasa.gov; then
+    log "api.nasa.gov is still unreachable after 10 minutes (no internet?); will try at the next scheduled run"
+    exit 3
+fi
+
 # Start Docker Desktop if it isn't running, and wait up to 3 minutes for it.
 if ! docker info >/dev/null 2>&1; then
     log "Docker is not running; starting Docker Desktop"
