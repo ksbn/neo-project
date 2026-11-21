@@ -31,6 +31,13 @@ services:
       DBMATE_MIGRATIONS_DIR: /db/migrations
       DBMATE_NO_DUMP_SCHEMA: "true"
       DBMATE_WAIT: "true"
+      # Refuse to apply a migration older than one already applied (e.g. a
+      # branch merged late with an earlier timestamp); rename it to a new
+      # timestamp instead of letting schemas silently diverge.
+      DBMATE_STRICT: "true"
+      # Postgres advisory lock: if two dbmate runs overlap (manual + scheduled
+      # job), the second waits instead of applying the same file twice.
+      DBMATE_MIGRATION_LOCK: "true"
     volumes:
       - ./db/migrations:/db/migrations
     command: ["up"]

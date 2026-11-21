@@ -55,15 +55,26 @@ pip install -r requirements.txt        # add -dev to also install test tools
 Fetch and upsert asteroid data for today:
 
 ```bash
-python pipeline.py
+scripts/run_pipeline.sh
 ```
 
-Or specify a custom date range (any length; it is fetched in 7-day windows, NASA's limit):
+This applies any pending migrations first, then runs `pipeline.py`. Arguments are passed through, so you can give a custom date range (any length; it is fetched in 7-day windows, NASA's limit):
 
 ```bash
-python pipeline.py --start 2026-11-10 --end 2026-11-15
-python pipeline.py --start 2026-11-10 --dry-run   # fetch + validate only, no database writes
+scripts/run_pipeline.sh --start 2026-11-10 --end 2026-11-15
+scripts/run_pipeline.sh --start 2026-11-10 --dry-run   # fetch + validate only, no database writes
 ```
+
+The schema step and the data step are separate programs, and `run_pipeline.sh` is the only place that combines them:
+
+| Piece | Job | Knows about |
+|---|---|---|
+| `scripts/migrate.sh apply\|check` | Bring the schema up to date, or check that it is | Docker, dbmate |
+| `pipeline.py` | Fetch, validate, upsert | A database connection, not migrations |
+| `scripts/run_pipeline.sh` | Run the schema step, then the data step | The order of the two steps |
+| `scripts/daily_pipeline.sh` | Wait for the network and Docker, then call `run_pipeline.sh` | Mac sleep/wake |
+
+`MIGRATIONS=check scripts/run_pipeline.sh` never changes the schema and refuses to run on an outdated one. `MIGRATIONS=skip` leaves out the schema step entirely, for example for a `--dry-run` without Docker. `python pipeline.py ...` still works on its own, but it doesn't apply migrations.
 
 `--start`/`--end` are short forms of `--start-date`/`--end-date`. Re-running any range is safe: unchanged rows are left alone, and an older close approach never overwrites a newer one.
 
@@ -75,8 +86,9 @@ python pipeline.py --start 2026-11-10 --dry-run   # fetch + validate only, no da
 | 1 | Configuration error (e.g. missing `.env` settings) |
 | 2 | Invalid command-line arguments |
 | 3 | NASA API unavailable or returned unusable data; try again later |
-| 4 | Database error |
+| 4 | Database error (from `migrate.sh`: Docker not running or PostgreSQL not healthy) |
 | 5 | Partial run: some 7-day windows were saved before a later one failed; re-run the same range to finish |
+| 6 | Schema step failed: a migration errored, or (`MIGRATIONS=check`) migrations are pending. From `run_pipeline.sh` / `migrate.sh` only |
 | 130 | Interrupted (Ctrl+C) |
 
 ### 5. Open the Dashboard (optional)
@@ -120,3 +132,13 @@ Each file has a `-- migrate:up` section and a `-- migrate:down` section. Rules:
 * Never edit a migration that has already been applied; add a new one.
 * If you change a `NUMERIC` column, update the matching limit in `models.py`. A test fails if they drift apart.
 * Prefer changes that don't lock or rewrite the table: add nullable columns, use `CREATE INDEX CONCURRENTLY` (with `-- migrate:up transaction:false`), and add `NOT NULL` via a `CHECK ... NOT VALID` constraint that is validated afterwards.
+* Put only **one** `CONCURRENTLY` statement in a `transaction:false` file. dbmate sends the whole section at once, and Postgres runs multiple statements as a single transaction, which `CONCURRENTLY` rejects. Two indexes means two files.
+* Files are applied in timestamp order, and `DBMATE_STRICT` rejects a file older than one already applied. If that happens after a merge, rename your file to a new timestamp (`migrate new` gives you one).
+
+### CI
+
+[.github/workflows/migrations.yml](.github/workflows/migrations.yml) runs on every push and PR. On a fresh PostgreSQL it:
+
+1. applies the base branch's migrations, then the PR's with `--strict`, which fails if the PR adds a migration that sorts before one already on the base branch;
+2. rolls every migration back and applies them again, which checks that each `-- migrate:down` really undoes its `up`;
+3. runs the test suite against the migrated database.
