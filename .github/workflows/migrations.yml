@@ -1,0 +1,80 @@
+name: Migrations & tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  migrate-and-test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: neo_db
+          POSTGRES_USER: neo_user
+          POSTGRES_PASSWORD: ci_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U neo_user -d neo_db"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Read by the pytest database fixtures (database.DbConfig.from_env).
+      DB_HOST: 127.0.0.1
+      DB_PORT: "5432"
+      DB_NAME: neo_db
+      DB_USER: neo_user
+      DB_PASSWORD: ci_password
+      DATABASE_URL: postgres://neo_user:ci_password@127.0.0.1:5432/neo_db?sslmode=disable
+      # Same image as docker-compose.yml, so CI and local runs behave alike.
+      DBMATE_IMAGE: ghcr.io/amacneil/dbmate:2.37.0
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply base branch migrations
+        if: github.event_name == 'pull_request'
+        run: |
+          mkdir -p "$RUNNER_TEMP/base"
+          git archive "origin/${{ github.base_ref }}" db/migrations | tar -x -C "$RUNNER_TEMP/base"
+          docker run --rm --network host -e DATABASE_URL \
+            -v "$RUNNER_TEMP/base/db/migrations:/db/migrations" \
+            "$DBMATE_IMAGE" --no-dump-schema -d /db/migrations up
+
+      - name: Apply migrations (strict order)
+        run: |
+          docker run --rm --network host -e DATABASE_URL \
+            -v "$GITHUB_WORKSPACE/db/migrations:/db/migrations" \
+            "$DBMATE_IMAGE" --no-dump-schema -d /db/migrations up --strict
+
+      - name: Roll back every migration, then reapply
+        run: |
+          dbmate() {
+            docker run --rm --network host -e DATABASE_URL \
+              -v "$GITHUB_WORKSPACE/db/migrations:/db/migrations" \
+              "$DBMATE_IMAGE" --no-dump-schema -d /db/migrations "$@"
+          }
+          count=$(ls db/migrations/*.sql | wc -l)
+          for _ in $(seq "$count"); do dbmate rollback; done
+          dbmate status
+          dbmate up --strict
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest
