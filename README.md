@@ -108,6 +108,11 @@ It opens the **Planetary Defense Control Room**:
 * **Alerts panel:** the stored anomaly alerts, most urgent first, filterable by severity.
 * **Close approaches:** the newest 5,000 asteroids with miss distance in LD, searchable and filterable.
 * **Inspector:** select a row in either table (or pick from its list) to see the asteroid's latest pass, its alerts, its orbit (orbit class, elements, period, Earth MOID, and whether it came from the local cache or NASA), and its recorded approach history.
+* **3D viewport** (in the inspector), with two views and a toggle inside the viewport:
+  * **Earth-centred:** Earth, the 1 LD ring (the Moon's distance), scale rings, and the asteroid's path 3 days either side of its latest pass. The direction comes from the orbits of the asteroid and Earth; the closest point is drawn at NASA's miss distance, and the legend shows what the orbit model alone predicted (for 2001 KF54: 18.74 LD vs NASA's 18.84 LD).
+  * **Sun-centred:** the Sun, Earth's orbit and the asteroid's orbit, with both bodies placed on the pass date.
+
+  Paths and orbits are to scale; the Earth and Sun spheres are enlarged and the legend says by how much. three.js is loaded from cdn.jsdelivr.net (pinned to one release), so the viewport needs internet access; without it, it says so and the rest of the page works.
 
 If the database is unavailable or empty it falls back to the live NASA API (last 3 days, one quick retry, so the page never waits minutes on a rate limit), and scores alerts on the fly. Pipeline status and history come from the database only. Each part degrades on its own: if, say, the alerts table doesn't exist yet, the rest of the page still loads.
 
@@ -148,6 +153,7 @@ src/planetary_defense/
     ├── state.py            # Which asteroid the inspector shows (shared by tables and picker)
     ├── messages.py         # How the dashboard words errors, pipeline status and orbit provenance
     └── components/         # kpi_bar, alerts_panel, approach_table, inspector_drawer
+        └── orbital_3d/     # bridge.py (geometry -> JSON -> page) and frontend/ (index.html, scene.js)
 ```
 
 Adapters translate library exceptions (`requests`, `pydantic`, `psycopg`) into `NeoError` subclasses. Entry points catch only `NeoError`; anything else is a bug and crashes with a traceback instead of being reported as an outage. How an error is presented is decided by each entry point: `cli.CLI_OUTCOMES` (exit code and log label) and `ui.messages.UI_MESSAGES` (dashboard text).

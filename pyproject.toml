@@ -32,6 +32,10 @@ neo-pipeline = "planetary_defense.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+# The 3D viewport's HTML template and scene script ship with the package.
+"planetary_defense.ui.components.orbital_3d" = ["frontend/*.html", "frontend/*.js"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # src: the package without needing an install; tests: support.py and fakes.py

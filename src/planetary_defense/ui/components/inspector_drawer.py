@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from typing import Any
 
 import pandas as pd
 import streamlit as st
 
 from planetary_defense.application.dashboard_service import DashboardData
+from planetary_defense.application.enrich_orbit import earth_view_from, sun_view_from
 from planetary_defense.domain.errors import NeoError
-from planetary_defense.domain.models import ApproachSummary, AsteroidSummary, AsteroidView, OrbitData
+from planetary_defense.domain.models import ApproachSummary, AsteroidSummary, AsteroidView, OrbitData, OrbitLookup
 from planetary_defense.domain.orbital_math import date_from_jd, orbital_period_days
 from planetary_defense.domain.units import au_to_ld, km_to_ld
+from planetary_defense.ui.components import orbital_3d
 from planetary_defense.ui.messages import describe, orbit_status
 from planetary_defense.ui.state import SELECTED, ensure_selection
 
@@ -42,6 +45,22 @@ def orbit_table(orbit: OrbitData) -> pd.DataFrame:
         ("NASA solution", orbit.orbit_id or "—"),
     ]
     return pd.DataFrame(rows, columns=["Element", "Value"])
+
+
+def viewport_payload(
+    lookup: OrbitLookup, name: str, row: AsteroidSummary | None, provenance: str, today: date
+) -> dict[str, Any]:
+    """3D payload: the Earth view of the latest recorded pass (if any) and the Sun view on that date."""
+    pass_date = row.close_approach_date if row is not None else None
+    miss_km = row.miss_distance_km if row is not None else None
+    if pass_date is not None and miss_km:
+        on, earth = pass_date, earth_view_from(lookup, pass_date, km_to_ld(miss_km))
+    else:
+        on, earth = today, None
+    return orbital_3d.build_payload(
+        name=name, hazardous=row is not None and row.is_potentially_hazardous, provenance=provenance,
+        earth=earth, sun=sun_view_from(lookup, on),
+    )
 
 
 def _render_pass(row: AsteroidSummary | None) -> None:
@@ -83,8 +102,13 @@ def render(view: AsteroidView, data: DashboardData) -> str | None:
     except NeoError as exc:
         st.info(f"Orbit unavailable: {describe(exc)}")
     else:
-        st.caption(orbit_status(lookup, datetime.now(UTC)))
-        st.dataframe(orbit_table(lookup.orbit), hide_index=True, width="stretch")
+        now = datetime.now(UTC)
+        status = orbit_status(lookup, now)
+        st.caption(status)
+        name = row.name if row is not None else choices[neo_id]
+        orbital_3d.render(viewport_payload(lookup, name, row, status, now.date()))
+        with st.expander("Orbital elements"):
+            st.dataframe(orbit_table(lookup.orbit), hide_index=True, width="stretch")
 
     st.markdown("**Approach history**")
     if not view.history_available:
