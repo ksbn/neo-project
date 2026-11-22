@@ -104,9 +104,9 @@ Use the same `venv` as the pipeline (`scripts/run_pipeline.sh` runs `venv/bin/py
 It opens **ASTRAEA: Planetary Defense Command**, a dark control-room layout (theme in `.streamlit/config.toml` and `ui/theme.py`):
 
 * **Command header:** title, an operator / UTC time / feed status pill, and **Sync / Refresh Feed**, which runs the pipeline for the last 3 days with your `NASA_API_KEY` and reloads. If it fails, a non-blocking banner says why and the stored data stays on screen.
-* **KPI strip:** **Threat Level** (worst alert on passes within ±7 days: LOW, GUARDED, ELEVATED, CRITICAL), **Near-Earth Objects** (tracked count with a 14-day approaches-per-day sparkline), **Close Approaches** in a ±3-day window with the closest pass, and **Global Defense Readiness** (NOMINAL, DEGRADED, IMPAIRED, STANDBY, with the last sync). All from stored data.
+* **KPI strip:** **Threat Level** (worst alert on passes within ±7 days, recorded or predicted: LOW, GUARDED, ELEVATED, CRITICAL), **Near-Earth Objects** (tracked count with a 14-day approaches-per-day sparkline), **Close Approaches** in a ±3-day window with the closest pass, and **Global Defense Readiness** (NOMINAL, DEGRADED, IMPAIRED, STANDBY, with the last sync). All from stored data.
 * **Left column:** **Hazard Alerts** (severity-badged cards with pass time, size and reason; **Track** selects the asteroid) and **Close Approach Data** (Object Name, Date (UTC), Distance (LD) coloured by tier: under 1 LD critical, 1–5 LD warning, Velocity, Diameter (m)). Selecting a row tracks it.
-* **Right column:** the **3D Space Viewport** for the tracked asteroid and its **Orbital Telemetry Readouts** (object and ID, inclination, eccentricity, semi-major axis, H, diameter, minimum Earth distance in LD and km, Earth MOID) with Live Feed / Data Synced / Orbit status indicators. Alerts and the approach history are in an expander below.
+* **Right column:** the **3D Space Viewport** for the tracked asteroid and its **Orbital Telemetry Readouts** (object and ID, inclination, eccentricity, semi-major axis, H, diameter, minimum Earth distance in LD and km, Earth MOID, orbit class, and the next predicted Earth pass) with Live Feed / Data Synced / Orbit status indicators. Alerts and the approach history are in an expander below, followed by **Upcoming Approaches**: NASA/JPL's predicted Earth passes of every asteroid with a cached orbit (next 30 days, year or 10 years), scored by the same anomaly rules, so a close or hazardous pass is flagged before it happens (for example 2007 WA at 4.66 LD on 2029-05-13). **▸** tracks the asteroid.
 * The 3D viewport has two views and a toggle inside it:
   * **Earth-centred:** Earth, the 1 LD ring (the Moon's distance), scale rings, and the asteroid's path 3 days either side of its latest pass. The direction comes from the orbits of the asteroid and Earth; the closest point is drawn at NASA's miss distance, and the legend shows what the orbit model alone predicted (for 2001 KF54: 18.74 LD vs NASA's 18.84 LD).
   * **Sun-centred:** the Sun, Earth's orbit and the asteroid's orbit, with both bodies placed on the pass date.
@@ -115,7 +115,7 @@ It opens **ASTRAEA: Planetary Defense Command**, a dark control-room layout (the
 
 If the database is unavailable or empty it falls back to the live NASA API (last 3 days, one quick retry, so the page never waits minutes on a rate limit), and scores alerts on the fly. Pipeline status and history come from the database only. Each part degrades on its own: if, say, the alerts table doesn't exist yet, the rest of the page still loads.
 
-After each pipeline run, the orbits of that run's warning and critical asteroids are fetched into the local cache (`--no-warm-orbits` turns this off), so the asteroids you are most likely to inspect open without waiting on NASA.
+After each pipeline run, the orbits of that run's asteroids are fetched into the local cache, warning and critical alerts first, up to `--warm-limit` (default 100; fresh cached orbits cost no NASA call; `--no-warm-orbits` turns this off). Each orbit comes with NASA's list of Earth approaches (1900–2200), which feeds the Upcoming Approaches panel. To cover data loaded earlier, re-run its date range once, e.g. `scripts/run_pipeline.sh --start 2026-10-20 --end 2026-11-22 --warm-limit 250` (about 1.5 minutes for 200 asteroids).
 
 Failures are not cached, so the page recovers as soon as a source is back, but a source that just failed is skipped for a cooldown (database 30 s, NASA 120 s) so that clicking around a degraded page stays instant. **Refresh data** clears the caches and the cooldowns. The Diagnostics panel in the sidebar says why a source was skipped.
 
@@ -217,6 +217,7 @@ docker compose run --rm migrate up                # apply pending migrations
 | `20261122120100_create_ingestion_runs` | `ingestion_runs`: one row per pipeline run, shown on the dashboard |
 | `20261122140000_create_orbital_elements` | `orbital_elements`: cached orbits from `/neo/{id}` (any NEO, no foreign key) |
 | `20261122140100_create_anomaly_alerts` | `anomaly_alerts`: alerts per close approach and rule, scored at ingest |
+| `20261122200000_create_orbit_approaches` | `orbit_approaches`: NASA's Earth approaches (past and predicted) for each cached orbit, replaced with the orbit; `orbital_elements.approaches_known` |
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#5-how-the-data-is-stored) for how they are written.
 

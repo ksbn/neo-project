@@ -9,7 +9,8 @@ from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, date, datetime
 
-from planetary_defense.application.dashboard_service import LoadResult, SyncReport
+from planetary_defense.application.dashboard_service import LoadResult, SyncReport, score_upcoming
+from planetary_defense.domain.anomaly_rules import default_rules
 from planetary_defense.domain.errors import OrbitUnavailable, StorageError, UpstreamUnavailable
 from planetary_defense.domain.models import (
     AnomalyAlert,
@@ -28,9 +29,11 @@ from planetary_defense.domain.models import (
     PipelineStatus,
     RunStatus,
     Severity,
+    UpcomingApproach,
     UpsertResult,
     latest,
 )
+from planetary_defense.domain.units import LUNAR_DISTANCE_KM
 from planetary_defense.infrastructure.nasa_dto import parse_feed
 
 from support import make_feed, make_neo
@@ -157,7 +160,17 @@ def zoozve_orbit() -> OrbitData:
         orbit_id="111",
         orbit_class="ATE",
         moid_au=0.025508,
+        approaches=ZOOZVE_APPROACHES,
     )
+
+
+# Zoozve's real Earth passes around today, as /neo/2524522 lists them (it lists 48, 1903-2195).
+ZOOZVE_APPROACHES = (
+    ApproachSummary(date(2018, 11, 4), "Earth", 8.6291488046, 5_630_509.743601497),
+    ApproachSummary(date(2026, 11, 2), "Earth", 8.7173137282, 6_018_477.458050977),
+    ApproachSummary(date(2034, 10, 31), "Earth", 8.8276273089, 6_462_577.195523135),
+    ApproachSummary(date(2042, 10, 30), "Earth", 8.9482235907, 6_915_084.258490358),
+)
 
 
 class FakeOrbitSource:
@@ -241,7 +254,17 @@ def control_room_view(*, live: bool = False) -> AsteroidView:
         return AsteroidView(overview=overview, rows=rows, alerts=alerts, trend=trend)
     status = PipelineStatus(last_run=LAST_RUN, last_success_at=LAST_RUN.finished_at)
     return AsteroidView(overview=overview, rows=rows, status=status, history_available=True, alerts=alerts,
-                        trend=trend)
+                        trend=trend, upcoming=UPCOMING, upcoming_alerts=score_upcoming(UPCOMING, default_rules()))
+
+
+# Predicted passes: 'a' (hazardous, 0.7 km) comes within 4 LD in March 2027; Zoozve's next is in 2034.
+UPCOMING = [
+    UpcomingApproach("a", "(2001 KF54)", True, 0.3, 0.7,
+                     ApproachSummary(date(2027, 3, 15), "Earth", 14.2, 4 * LUNAR_DISTANCE_KM)),
+    UpcomingApproach("b", "(2019 BG3)", False, 0.05, 0.1,
+                     ApproachSummary(date(2027, 6, 1), "Earth", 7.5, 30 * LUNAR_DISTANCE_KM)),
+    UpcomingApproach("2524522", "524522 Zoozve (2002 VE68)", True, 0.2, 0.45, ZOOZVE_APPROACHES[2]),
+]
 
 
 class FakeDashboard:

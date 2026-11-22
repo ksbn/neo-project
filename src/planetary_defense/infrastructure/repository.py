@@ -14,6 +14,8 @@ Tables:
 * ``close_approaches``: every approach ever seen (history), one row per
   asteroid, date and body.
 * ``ingestion_runs``: one row per pipeline run (:class:`IngestionRunRepository`).
+* ``orbital_elements`` and ``orbit_approaches``: the orbit cache with NASA's list of
+  Earth approaches, past and predicted (:class:`OrbitRepository`).
 
 Every read runs in its own explicit transaction, so a read never leaves an
 implicit transaction open that a later write would silently join.
@@ -44,6 +46,7 @@ from planetary_defense.domain.models import (
     PipelineStatus,
     RunStatus,
     Severity,
+    UpcomingApproach,
     UpsertResult,
     latest,
 )
@@ -397,14 +400,20 @@ _ORBIT_COLUMNS: Final = (
 )
 
 
+EARTH: Final = "Earth"
+
+
 class OrbitRepository:
-    """The ``orbital_elements`` table. Satisfies :class:`application.ports.OrbitCache`."""
+    """The ``orbital_elements`` and ``orbit_approaches`` tables.
+
+    Satisfies :class:`application.ports.OrbitCache` and :class:`application.ports.UpcomingReader`.
+    """
 
     def __init__(self, conn: psycopg.Connection) -> None:
         self._conn = conn
 
     def get_orbit(self, neo_reference_id: str) -> CachedOrbit | None:
-        query = sql.SQL("SELECT {cols} FROM orbital_elements WHERE neo_reference_id = %s").format(
+        query = sql.SQL("SELECT {cols}, approaches_known FROM orbital_elements WHERE neo_reference_id = %s").format(
             cols=sql.SQL(", ").join(map(sql.Identifier, _ORBIT_COLUMNS))
         )
         try:
@@ -424,8 +433,22 @@ class OrbitRepository:
         orbit = OrbitData(
             neo_reference_id=row["neo_reference_id"], elements=elements, orbit_id=row["orbit_id"],
             orbit_class=row["orbit_class"], moid_au=row["moid_au"],
+            approaches=self._approaches(neo_reference_id) if row["approaches_known"] else None,
         )
         return CachedOrbit(orbit=orbit, fetched_at=row["fetched_at"])
+
+    def _approaches(self, neo_reference_id: str) -> tuple[ApproachSummary, ...]:
+        query = """
+            SELECT close_approach_date, relative_velocity_km_s, miss_distance_km
+            FROM orbit_approaches WHERE neo_reference_id = %s ORDER BY close_approach_date
+        """
+        try:
+            with self._conn.transaction(), self._conn.cursor() as cur:
+                cur.execute(query, (neo_reference_id,))
+                rows = cur.fetchall()
+        except psycopg.Error as exc:
+            raise _storage_error("Reading cached approaches", exc) from exc
+        return tuple(ApproachSummary(day, EARTH, float(v), float(d)) for day, v, d in rows)
 
     def put_orbit(self, orbit: CachedOrbit) -> None:
         data, el = orbit.orbit, orbit.orbit.elements
@@ -435,22 +458,70 @@ class OrbitRepository:
             "ascending_node_deg": el.ascending_node_deg, "perihelion_argument_deg": el.perihelion_argument_deg,
             "mean_anomaly_deg": el.mean_anomaly_deg, "epoch_jd": el.epoch_jd, "orbit_id": data.orbit_id,
             "orbit_class": data.orbit_class, "moid_au": data.moid_au, "fetched_at": orbit.fetched_at,
+            "approaches_known": data.approaches is not None,
         }
+        columns = (*_ORBIT_COLUMNS, "approaches_known")
         query = sql.SQL(
             "INSERT INTO orbital_elements ({cols}) VALUES ({vals}) "
             "ON CONFLICT (neo_reference_id) DO UPDATE SET {updates}"
         ).format(
-            cols=sql.SQL(", ").join(map(sql.Identifier, _ORBIT_COLUMNS)),
-            vals=sql.SQL(", ").join(map(sql.Placeholder, _ORBIT_COLUMNS)),
+            cols=sql.SQL(", ").join(map(sql.Identifier, columns)),
+            vals=sql.SQL(", ").join(map(sql.Placeholder, columns)),
             updates=sql.SQL(", ").join(
-                sql.SQL("{c} = EXCLUDED.{c}").format(c=sql.Identifier(c)) for c in _ORBIT_COLUMNS[1:]
+                sql.SQL("{c} = EXCLUDED.{c}").format(c=sql.Identifier(c)) for c in columns[1:]
             ),
         )
+        approaches = [
+            (data.neo_reference_id, a.close_approach_date, a.relative_velocity_km_s, a.miss_distance_km)
+            for a in data.approaches or () if a.orbiting_body == EARTH
+        ]
         try:
-            with self._conn.transaction():
-                self._conn.execute(query, values)
+            # One transaction: the orbit and its approach list are always replaced together.
+            with self._conn.transaction(), self._conn.cursor() as cur:
+                cur.execute(query, values)
+                cur.execute("DELETE FROM orbit_approaches WHERE neo_reference_id = %s", (data.neo_reference_id,))
+                if approaches:
+                    cur.executemany(
+                        "INSERT INTO orbit_approaches (neo_reference_id, close_approach_date, relative_velocity_km_s,"
+                        " miss_distance_km) VALUES (%s, %s, %s, %s)"
+                        " ON CONFLICT (neo_reference_id, close_approach_date) DO NOTHING",
+                        approaches,
+                    )
         except psycopg.Error as exc:
             raise _storage_error("Caching the orbit", exc) from exc
+
+    def upcoming_approaches(self, since: date, until: date, limit: int = 500) -> list[UpcomingApproach]:
+        """Predicted Earth passes from ``since`` to ``until`` (inclusive) of every cached asteroid, soonest first.
+
+        Names and sizes come from ``asteroids``; an asteroid only seen through the live
+        NASA fallback isn't stored there, so it is listed by its id.
+        """
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+        query = """
+            SELECT p.neo_reference_id, COALESCE(s.name, p.neo_reference_id),
+                   COALESCE(s.is_potentially_hazardous, FALSE), s.estimated_diameter_min_km,
+                   s.estimated_diameter_max_km, p.close_approach_date, p.relative_velocity_km_s, p.miss_distance_km
+            FROM orbit_approaches p LEFT JOIN asteroids s USING (neo_reference_id)
+            WHERE p.close_approach_date BETWEEN %s AND %s
+            ORDER BY p.close_approach_date, p.miss_distance_km, p.neo_reference_id
+            LIMIT %s
+        """
+        try:
+            with self._conn.transaction(), self._conn.cursor() as cur:
+                cur.execute(query, (since, until, limit))
+                rows = cur.fetchall()
+        except psycopg.Error as exc:
+            raise _storage_error("Upcoming approaches", exc) from exc
+
+        def num(value: Any) -> float | None:
+            return float(value) if value is not None else None
+
+        return [
+            UpcomingApproach(ref, name, bool(pha), num(dmin), num(dmax),
+                             ApproachSummary(day, EARTH, float(velocity), float(miss)))
+            for ref, name, pha, dmin, dmax, day, velocity, miss in rows
+        ]
 
 
 # --------------------------------------------------------------------------- #

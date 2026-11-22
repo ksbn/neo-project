@@ -39,8 +39,8 @@ READINESS: Final = {
 
 
 def threat(view: AsteroidView, today: date) -> tuple[int, str, str]:
-    """(level 1-5, label, colour) from the worst alert on passes within +-7 days."""
-    level, name = THREAT_SCALE[threat_level(view.alerts, today)]
+    """(level 1-5, label, colour) from the worst alert on passes within +-7 days, recorded or predicted."""
+    level, name = THREAT_SCALE[threat_level([*view.alerts, *view.upcoming_alerts], today)]
     return level, f"{name} (Level {level})", SEGMENTS[level - 1]
 
 

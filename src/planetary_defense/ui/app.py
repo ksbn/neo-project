@@ -36,7 +36,14 @@ from planetary_defense.infrastructure.repository import (
     OrbitRepository,
 )
 from planetary_defense.ui import theme
-from planetary_defense.ui.components import approach_table, command_header, hazard_alerts, kpi_strip, orbit_stage
+from planetary_defense.ui.components import (
+    approach_table,
+    command_header,
+    hazard_alerts,
+    kpi_strip,
+    orbit_stage,
+    upcoming_approaches,
+)
 from planetary_defense.ui.messages import describe, run_health, sync_message
 
 DB_COOLDOWN_S = 30
@@ -75,7 +82,10 @@ def _connect():
 @st.cache_data(ttl=300, show_spinner="Loading the control room from PostgreSQL...")
 def database_view() -> AsteroidView:
     with _connect() as conn:
-        return view_from_store(AsteroidRepository(conn), IngestionRunRepository(conn), AlertRepository(conn), MAX_ROWS)
+        return view_from_store(
+            AsteroidRepository(conn), IngestionRunRepository(conn), AlertRepository(conn), MAX_ROWS,
+            upcoming=OrbitRepository(conn), rules=default_rules(get_settings().alert_thresholds()),
+        )
 
 
 @st.cache_data(ttl=60, show_spinner="Fetching live data from NASA...")
@@ -214,7 +224,8 @@ def panel_title(text: str) -> None:
     st.html(f'<div class="astraea-panel-title">{text} <span class="chev">⌃</span></div>')
 
 
-def render(data: DashboardData) -> None:
+def render(data: DashboardData, today: date | None = None) -> None:
+    """The page. ``today`` defaults to the real date; tests pin it so date windows stay stable."""
     st.set_page_config(page_title="ASTRAEA: Planetary Defense Command", page_icon="🛰️", layout="wide")
     theme.apply()
 
@@ -229,7 +240,7 @@ def render(data: DashboardData) -> None:
         return
 
     view = result.view
-    kpi_strip.render(view)
+    kpi_strip.render(view, today)
     render_status(view)
     left, right = st.columns([5, 6], gap="medium")
     with left, st.container(border=True):
@@ -237,7 +248,9 @@ def render(data: DashboardData) -> None:
         hazard_alerts.render(view)
         approach_table.render(view)
     with right:
-        orbit_stage.render(view, data)
+        orbit_stage.render(view, data, today)
+        with st.container(border=True):
+            upcoming_approaches.render(view, today)
     render_diagnostics(result)
 
 

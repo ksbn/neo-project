@@ -14,6 +14,7 @@ from planetary_defense.application.ports import (
     OrbitSource,
     RunLog,
     RunReader,
+    UpcomingReader,
 )
 from planetary_defense.domain.models import FeedBatch
 from planetary_defense.infrastructure.nasa_client import NeoWsClient
@@ -59,4 +60,5 @@ def test_enrichment_ports_conform(conn) -> None:
     sources: list[OrbitSource] = [NeoWsClient("k"), FakeOrbitSource()]
     caches: list[OrbitCache] = [OrbitRepository(conn), InMemoryOrbitCache()]
     alert_stores: list[AlertStore] = [AlertRepository(conn), AlertStoreSpy()]
-    assert len(sources) == len(caches) == len(alert_stores) == 2
+    upcoming: UpcomingReader = OrbitRepository(conn)
+    assert len(sources) == len(caches) == len(alert_stores) == 2 and upcoming is not None

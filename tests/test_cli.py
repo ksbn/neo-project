@@ -324,27 +324,43 @@ def warm_run(argv, env, cache, source, alert_store=None) -> int:
 
 
 @responses.activate
-def test_orbits_of_warning_alerts_are_warmed_after_a_run():
-    responses.get(FEED, json=week_feed(date(2026, 11, 1), "a"))  # every test NEO passes at 11.9 LD
+def test_orbits_of_every_asteroid_in_the_run_are_warmed():
+    """So the upcoming-approaches panel knows their predicted passes, not only the alerted ones'."""
+    responses.get(FEED, json=week_feed(date(2026, 11, 1), "a"))  # every test NEO passes at 11.9 LD: no alerts
     cache, source = InMemoryOrbitCache(), FakeOrbitSource()
-    env = {**ENV, "ALERT_WARNING_LD": "12", "ALERT_WATCH_LD": "12"}  # so they all raise a warning
 
-    assert warm_run(["--start", "2026-11-01", "--end", "2026-11-07"], env, cache, source) == ExitCode.OK
+    assert warm_run(["--start", "2026-11-01", "--end", "2026-11-07"], ENV, cache, source) == ExitCode.OK
     assert sorted(source.calls) == sorted(f"a{i}" for i in range(7))
     assert set(cache.orbits) == set(source.calls)
 
 
 @responses.activate
-def test_no_warming_without_warning_alerts_or_when_disabled():
+def test_warning_alerts_are_warmed_first_within_the_limit():
+    feed = week_feed(date(2026, 11, 1), "a")
+    feed["near_earth_objects"]["2026-11-07"][0]["close_approach_data"][0]["miss_distance"]["kilometers"] = "1000000"
+    responses.get(FEED, json=feed)  # a6 now passes at 2.6 LD: a warning
+    source = FakeOrbitSource()
+
+    argv = ["--start", "2026-11-01", "--end", "2026-11-07", "--warm-limit", "2"]
+    assert warm_run(argv, ENV, InMemoryOrbitCache(), source) == ExitCode.OK
+    assert source.calls == ["a6", "a0"]
+
+
+@responses.activate
+def test_no_warming_when_disabled():
     responses.get(FEED, json=week_feed(date(2026, 11, 1), "a"))
     source = FakeOrbitSource()
-    assert warm_run(["--start", "2026-11-01", "--end", "2026-11-07"], ENV, InMemoryOrbitCache(), source) == 0
-    assert source.calls == []  # 11.9 LD raises nothing at the default thresholds
-
-    env = {**ENV, "ALERT_WARNING_LD": "12", "ALERT_WATCH_LD": "12"}
     argv = ["--start", "2026-11-01", "--end", "2026-11-07", "--no-warm-orbits"]
-    assert warm_run(argv, env, InMemoryOrbitCache(), source) == ExitCode.OK
+    assert warm_run(argv, ENV, InMemoryOrbitCache(), source) == ExitCode.OK
     assert source.calls == []
+    assert warm_run([*argv[:4], "--warm-limit", "0"], ENV, InMemoryOrbitCache(), source) == ExitCode.OK
+    assert source.calls == []
+
+
+def test_a_negative_warm_limit_is_a_usage_error():
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["--warm-limit", "-1"])
+    assert exc.value.code == ExitCode.USAGE_ERROR
 
 
 @responses.activate

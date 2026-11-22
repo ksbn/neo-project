@@ -22,13 +22,21 @@ import logging
 from collections.abc import Mapping
 from datetime import date
 from decimal import Decimal
-from typing import Any, Self
+from typing import Any, Final, Self
 
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, ValidationError, model_validator
 
 from planetary_defense.domain import models as domain
 from planetary_defense.domain.errors import FeedContractError, OrbitUnavailable
-from planetary_defense.domain.models import Asteroid, FeedBatch, InvalidObject, Observation, OrbitalElements, OrbitData
+from planetary_defense.domain.models import (
+    ApproachSummary,
+    Asteroid,
+    FeedBatch,
+    InvalidObject,
+    Observation,
+    OrbitalElements,
+    OrbitData,
+)
 
 __all__ = ["parse_feed", "parse_orbit", "to_observation"]
 
@@ -248,6 +256,30 @@ class _OrbitalData(_IngestModel):
 class _NeoDetail(_IngestModel):
     neo_reference_id: str = Field(min_length=1)
     orbital_data: _OrbitalData | None = None
+    close_approach_data: list[Any] = Field(default_factory=list)  # validated one by one in _earth_approaches
+
+
+EARTH: Final = "Earth"
+
+
+def _earth_approaches(ref: str, raw: list[Any]) -> tuple[ApproachSummary, ...]:
+    """Every valid Earth approach, oldest first. A malformed entry is skipped, not fatal: it's one pass of ~100."""
+    found: dict[date, ApproachSummary] = {}
+    skipped = 0
+    for item in raw:
+        try:
+            a = CloseApproach.model_validate(item)
+        except ValidationError:
+            skipped += 1
+            continue
+        if a.orbiting_body == EARTH:
+            found[a.close_approach_date] = ApproachSummary(
+                a.close_approach_date, a.orbiting_body,
+                float(a.relative_velocity.kilometers_per_second), float(a.miss_distance.kilometers),
+            )
+    if skipped:
+        logger.warning("Skipped %d malformed close approaches of asteroid %s", skipped, ref)
+    return tuple(found[d] for d in sorted(found))
 
 
 def parse_orbit(payload: Mapping[str, Any]) -> OrbitData:
@@ -289,6 +321,7 @@ def parse_orbit(payload: Mapping[str, Any]) -> OrbitData:
         orbit_id=od.orbit_id,
         orbit_class=od.orbit_class.orbit_class_type if od.orbit_class else None,
         moid_au=od.minimum_orbit_intersection,
+        approaches=_earth_approaches(ref, detail.close_approach_data),
     )
 
 

@@ -93,9 +93,15 @@ def _dot(color: str) -> str:
     return f'<span class="astraea-dot" style="color:{color};background:{color}"></span>'
 
 
-def telemetry_html(neo_id: str, name: str, row: AsteroidSummary | None, lookup: OrbitLookup | None) -> str:
+def telemetry_html(
+    neo_id: str, name: str, row: AsteroidSummary | None, lookup: OrbitLookup | None, today: date | None = None
+) -> str:
     """The readouts: a name tile and two columns of key/value rows. NASA-derived text is escaped."""
     el = lookup.orbit.elements if lookup else None
+    upcoming = lookup.orbit.next_approach(today or date.today()) if lookup else None
+    next_pass = (f"{upcoming.close_approach_date:%Y-%m-%d} · {km_to_ld(upcoming.miss_distance_km):.2f} LD"
+                 if upcoming else "none listed to 2200" if lookup and lookup.orbit.approaches is not None else "—")
+    orbit_class = html.escape(lookup.orbit.orbit_class) if lookup and lookup.orbit.orbit_class else "—"
     moid = lookup.orbit.moid_au if lookup else None
     dash = "—"
     if row is not None and row.estimated_diameter_max_km:
@@ -110,6 +116,7 @@ def telemetry_html(neo_id: str, name: str, row: AsteroidSummary | None, lookup: 
         _row("Inclination (deg)", f"{el.inclination_deg:.3f}°" if el else dash),
         _row("Eccentricity", f"{el.eccentricity:.4f}" if el else dash),
         _row("Diameter (est.)", diameter),
+        _row("Next Earth Pass (predicted)", next_pass),
     ]
     right = [
         _row("Semi-Major Axis (AU)", f"{el.semi_major_axis_au:.4f}" if el else dash),
@@ -117,6 +124,7 @@ def telemetry_html(neo_id: str, name: str, row: AsteroidSummary | None, lookup: 
              else dash),
         _row("Minimum Earth Distance (LD/km)", miss),
         _row("Earth MOID (LD)", f"{au_to_ld(moid):.2f}" if moid is not None else dash),
+        _row("Orbit Class", orbit_class),
     ]
     return (f'<div class="astraea-telemetry"><div class="name">{html.escape(name)}</div>'
             f'<div class="rows">{"".join(left)}</div><div class="rows">{"".join(right)}</div></div>')
@@ -145,11 +153,12 @@ def status_html(view: AsteroidView, lookup: OrbitLookup | None, orbit_error: str
 
 def _choices(view: AsteroidView) -> dict[str, str]:
     names = {a.neo_reference_id: a.name for a in view.alerts}
+    names.update({p.neo_reference_id: p.name for p in view.upcoming})
     names.update({r.neo_reference_id: r.name for r in view.rows})
     return names
 
 
-def render(view: AsteroidView, data: DashboardData) -> str | None:
+def render(view: AsteroidView, data: DashboardData, today: date | None = None) -> str | None:
     """Draws the viewport and telemetry panels and returns the tracked asteroid's id."""
     names = _choices(view)
     if not names:
@@ -157,6 +166,7 @@ def render(view: AsteroidView, data: DashboardData) -> str | None:
         return None
     ensure_selection(view, list(names))
     now = datetime.now(UTC)
+    today = today or now.date()
 
     with st.container(border=True):
         title, picker = st.columns([2, 3], vertical_alignment="center")
@@ -178,7 +188,7 @@ def render(view: AsteroidView, data: DashboardData) -> str | None:
         provenance = orbit_status(lookup, now) if lookup else f"Orbit unavailable: {orbit_error}"
         context = context_arcs(view, neo_id, data.cached_orbits(context_candidates(view, neo_id)))
 
-        payload = viewport_payload(lookup, names[neo_id], row, provenance, now.date(), context=context)
+        payload = viewport_payload(lookup, names[neo_id], row, provenance, today, context=context)
         if payload is not None:
             orbital_3d.render(payload, height=VIEWPORT_HEIGHT)
         if orbit_error:
@@ -189,7 +199,7 @@ def render(view: AsteroidView, data: DashboardData) -> str | None:
 
     with st.container(border=True):
         st.html('<div class="astraea-panel-title">Orbital Telemetry Readouts <span class="chev">⌄</span></div>')
-        st.html(telemetry_html(neo_id, names[neo_id], row, lookup))
+        st.html(telemetry_html(neo_id, names[neo_id], row, lookup, today))
 
     st.html(status_html(view, lookup, orbit_error))
     with st.expander("Alerts & approach history"):

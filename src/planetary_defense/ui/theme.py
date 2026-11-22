@@ -72,6 +72,7 @@ CSS: Final = f"""
 .astraea-alert {{ display: grid; grid-template-columns: 26px 1fr 70px 96px 70px; gap: 8px; align-items: center;
                   border-left: 4px solid; border-radius: 4px; background: {PALETTE["panel_hi"]};
                   padding: 7px 10px; margin: 2px 0; }}
+.astraea-alert.upcoming {{ grid-template-columns: 26px 1fr 92px 84px 70px; }}
 .astraea-alert .icon {{ font-size: 1.1rem; text-align: center; }}
 .astraea-alert .label {{ font-weight: 700; font-size: 0.86rem; }}
 .astraea-alert .why {{ font-size: 0.78rem; color: {PALETTE["text"]}; }}
