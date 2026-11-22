@@ -103,3 +103,12 @@ def test_inspector_shows_the_3d_view_of_the_selected_asteroid():
 
 def test_no_3d_view_without_an_orbit():
     assert viewport_payloads(run(orbit_fails=True)) == []
+
+
+def test_command_header_and_non_blocking_sync_failure():
+    at = run()
+    assert any("ASTRAEA" in h.proto.body for h in at.get("html"))
+    at.button(key="sync_feed").click().run()
+    assert not at.exception
+    assert any("did not complete" in w.value for w in at.warning)
+    assert metrics(at)  # the stored data is still on the page

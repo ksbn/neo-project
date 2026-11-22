@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, date, datetime
 
-from planetary_defense.application.dashboard_service import LoadResult
+from planetary_defense.application.dashboard_service import LoadResult, SyncReport
 from planetary_defense.domain.errors import OrbitUnavailable, StorageError, UpstreamUnavailable
 from planetary_defense.domain.models import (
     AnomalyAlert,
@@ -265,3 +265,6 @@ class FakeDashboard:
 
     def refresh(self) -> None:
         self.refreshed += 1
+
+    def sync(self) -> SyncReport:
+        return SyncReport(ok=False, message="Sync did not complete because of NASA being unavailable.")

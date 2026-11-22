@@ -7,7 +7,7 @@ so tests can render it with an in-memory fake. Components live in ``ui/component
 Started by the root ``app.py``.
 """
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import streamlit as st
 
@@ -17,6 +17,7 @@ from planetary_defense.application.dashboard_service import (
     FallbackReader,
     LoadResult,
     Source,
+    SyncReport,
     view_from_feed,
     view_from_store,
 )
@@ -34,8 +35,9 @@ from planetary_defense.infrastructure.repository import (
     IngestionRunRepository,
     OrbitRepository,
 )
-from planetary_defense.ui.components import alerts_panel, approach_table, inspector_drawer, kpi_bar
-from planetary_defense.ui.messages import describe, run_health
+from planetary_defense.ui import theme
+from planetary_defense.ui.components import alerts_panel, approach_table, command_header, inspector_drawer, kpi_bar
+from planetary_defense.ui.messages import describe, run_health, sync_message
 
 DB_COOLDOWN_S = 30
 NASA_COOLDOWN_S = 120
@@ -143,6 +145,21 @@ class LiveDashboard:
     def orbit(self, neo_reference_id: str) -> OrbitLookup:
         return orbit_lookup(neo_reference_id)
 
+    def sync(self) -> SyncReport:
+        """Run the pipeline for the last 3 days, exactly as the scheduled job does, with quick NASA retries."""
+        from planetary_defense.cli import main as run_pipeline  # the batch entry point, reused as-is
+
+        end = date.today()
+        start = end - timedelta(days=2)
+        code = run_pipeline(
+            ["--start", start.isoformat(), "--end", end.isoformat(), "--no-warm-orbits"],
+            settings=get_settings(),
+            open_feed=lambda s: NeoWsClient(s.nasa_api_key(), profile=INTERACTIVE, user_agent=USER_AGENT),
+        )
+        self.refresh()
+        ok, message = sync_message(int(code), start, end)
+        return SyncReport(ok=ok, message=message)
+
     def refresh(self) -> None:
         for cached in (database_view, nasa_view, approach_history, orbit_lookup):
             cached.clear()
@@ -180,11 +197,11 @@ def render_status(view: AsteroidView) -> None:
 
 
 def render(data: DashboardData) -> None:
-    st.set_page_config(page_title="Planetary Defense Control Room", page_icon="🌠", layout="wide")
-    st.title("Planetary Defense Control Room")
-    st.caption("Near-Earth objects from NASA NeoWs: alerts, close approaches and orbits.")
+    st.set_page_config(page_title="ASTRAEA: Planetary Defense Command", page_icon="🛰️", layout="wide")
+    theme.apply()
 
     result = data.load()
+    command_header.render(result, data)
     render_sidebar(result, data)
     if result.view is None:
         st.warning(

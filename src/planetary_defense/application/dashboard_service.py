@@ -158,3 +158,13 @@ class DashboardData(Protocol):
         ...
 
     def refresh(self) -> None: ...
+
+    def sync(self) -> SyncReport:
+        """Fetch the latest days from NASA into the database now. Never raises for operational failures."""
+        ...
+
+
+@dataclass(frozen=True)
+class SyncReport:
+    ok: bool
+    message: str
