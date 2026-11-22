@@ -9,9 +9,9 @@ from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
-from planetary_defense.application.enrich_orbit import OrbitEnricher
+from planetary_defense.application.enrich_orbit import OrbitEnricher, warm_orbits
 from planetary_defense.domain.errors import OrbitUnavailable, StorageError, UpstreamRateLimited, UpstreamUnavailable
-from planetary_defense.domain.models import CachedOrbit, OrbitOrigin
+from planetary_defense.domain.models import AnomalyAlert, CachedOrbit, OrbitOrigin, Severity
 from planetary_defense.domain.units import km_to_ld
 
 from fakes import FakeOrbitSource, InMemoryOrbitCache, zoozve_orbit
@@ -141,3 +141,44 @@ def test_sun_view_has_both_orbits_and_todays_positions():
     assert max(sun_distances) == pytest.approx(1.0203, abs=1e-3)  # NASA's aphelion distance
     assert 0.98 < math.dist(view.earth_position, (0, 0, 0)) < 1.02
     assert 0.42 < math.dist(view.asteroid_position, (0, 0, 0)) < 1.03
+
+
+# --------------------------------------------------------------------------- #
+# Warming the cache for the most urgent alerts
+# --------------------------------------------------------------------------- #
+
+
+def an_alert(ref: str, severity: Severity) -> AnomalyAlert:
+    return AnomalyAlert("close_approach", severity, ref, f"({ref})", date(2026, 11, 20), "close", 3.0, 5.0)
+
+
+def test_warm_orbits_fetches_warning_and_worse_once_each_most_urgent_first():
+    cache, source = cached(timedelta(days=1)), FakeOrbitSource()  # Zoozve already cached
+    alerts = [an_alert("1", Severity.WARNING), an_alert("2", Severity.CRITICAL), an_alert("1", Severity.WARNING),
+              an_alert(ZOOZVE, Severity.WARNING), an_alert("3", Severity.WATCH)]
+
+    result = warm_orbits(enricher(cache, source), alerts)
+
+    assert source.calls == ["2", "1"]  # critical first; Zoozve was a cache hit; watch is below the bar
+    assert (result.fetched, result.cached, result.failed) == (2, 1, 0)
+
+
+def test_warm_orbits_respects_the_limit_and_the_severity_bar():
+    source = FakeOrbitSource()
+    alerts = [an_alert(str(i), Severity.WATCH) for i in range(5)]
+    result = warm_orbits(enricher(InMemoryOrbitCache(), source), alerts, min_severity=Severity.WATCH, limit=3)
+    assert source.calls == ["0", "1", "2"] and result.fetched == 3
+
+
+def test_warm_orbits_never_raises_on_operational_failures(caplog):
+    source = FakeOrbitSource(fail=UpstreamUnavailable("NASA down"))
+    with caplog.at_level(logging.WARNING):
+        result = warm_orbits(enricher(InMemoryOrbitCache(), source), [an_alert("1", Severity.CRITICAL)])
+    assert (result.fetched, result.failed) == (0, 1)
+    assert "Could not warm the orbit of 1" in caplog.text
+
+
+def test_warm_orbits_counts_a_failed_refresh_of_a_stale_orbit_as_failed():
+    source = FakeOrbitSource(fail=UpstreamUnavailable("NASA down"))
+    result = warm_orbits(enricher(cached(timedelta(days=60)), source), [an_alert(ZOOZVE, Severity.CRITICAL)])
+    assert (result.fetched, result.cached, result.failed) == (0, 0, 1)

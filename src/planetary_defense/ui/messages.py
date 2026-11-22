@@ -10,8 +10,15 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Final, Literal
 
-from planetary_defense.domain.errors import ConfigError, NeoError, StorageError, UpstreamAuthError, UpstreamError
-from planetary_defense.domain.models import PipelineStatus, RunStatus
+from planetary_defense.domain.errors import (
+    ConfigError,
+    NeoError,
+    OrbitUnavailable,
+    StorageError,
+    UpstreamAuthError,
+    UpstreamError,
+)
+from planetary_defense.domain.models import OrbitLookup, OrbitOrigin, PipelineStatus, RunStatus
 from planetary_defense.infrastructure.error_boundary import SourceCoolingDown
 
 UI_MESSAGES: dict[type[NeoError], Callable[[NeoError], str]] = {
@@ -20,6 +27,7 @@ UI_MESSAGES: dict[type[NeoError], Callable[[NeoError], str]] = {
     ConfigError: str,
     UpstreamAuthError: lambda _: "NASA rejected the API key; check NASA_API_KEY in .env.",
     UpstreamError: str,
+    OrbitUnavailable: str,
 }
 
 
@@ -65,8 +73,9 @@ def _ago(delta: timedelta) -> str:
     if hours < 1:
         return "less than an hour ago"
     if hours < 48:
-        return f"{hours:.0f} hours ago"
-    return f"{hours / 24:.0f} days ago"
+        n = round(hours)
+        return f"{n} hour{'s' if n != 1 else ''} ago"
+    return f"{round(hours / 24)} days ago"
 
 
 def run_health(status: PipelineStatus | None, now: datetime, stale_after: timedelta = STALE_AFTER) -> Health:
@@ -93,3 +102,20 @@ def run_health(status: PipelineStatus | None, now: datetime, stale_after: timede
     if age > stale_after:
         return Health("warning", f"Data may be stale: the last pipeline run finished {_ago(age)} ({when}; {summary}).")
     return Health("success", f"Last pipeline run: {when} ({_ago(age)}): {summary}.")
+
+
+# --------------------------------------------------------------------------- #
+# Orbit provenance
+# --------------------------------------------------------------------------- #
+
+
+def orbit_status(lookup: OrbitLookup, now: datetime) -> str:
+    """Where the inspector's orbit came from, in one sentence (plus the lookup's own note)."""
+    fetched = lookup.fetched_at.astimezone().strftime("%Y-%m-%d %H:%M")
+    if lookup.origin is OrbitOrigin.NASA:
+        text = "Orbit fetched from NASA just now."
+    elif lookup.origin is OrbitOrigin.CACHE:
+        text = f"Orbit from the local cache, fetched from NASA {_ago(now - lookup.fetched_at)} ({fetched})."
+    else:
+        text = f"Stale orbit from the local cache ({fetched})."
+    return f"{text} {lookup.note}" if lookup.note else text

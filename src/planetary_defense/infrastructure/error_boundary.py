@@ -14,7 +14,9 @@ import time
 from collections.abc import Callable
 from typing import TypeVar
 
-from planetary_defense.domain.errors import NeoError
+from planetary_defense.application.ports import OrbitSource
+from planetary_defense.domain.errors import NeoError, UpstreamUnavailable
+from planetary_defense.domain.models import OrbitData
 
 T = TypeVar("T")
 
@@ -31,13 +33,20 @@ class SourceCoolingDown(NeoError):
 class CircuitBreaker:
     """Opens after one failure and closes again after ``cooldown_s`` or :meth:`reset`.
 
-    Only :class:`NeoError` opens it: a programmer error propagates untouched.
-    Safe to share between Streamlit sessions (threads).
+    Only the ``trips_on`` errors open it (any :class:`NeoError` by default); other
+    errors pass through and a programmer error propagates untouched. Safe to
+    share between Streamlit sessions (threads).
     """
 
-    def __init__(self, cooldown_s: float, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(
+        self,
+        cooldown_s: float,
+        clock: Callable[[], float] = time.monotonic,
+        trips_on: tuple[type[NeoError], ...] = (NeoError,),
+    ) -> None:
         self._cooldown_s = cooldown_s
         self._clock = clock
+        self._trips_on = trips_on
         self._lock = threading.Lock()
         self._open_until = 0.0
         self._last_error: NeoError | None = None
@@ -49,7 +58,7 @@ class CircuitBreaker:
                 raise SourceCoolingDown(self._last_error, remaining)
         try:
             result = fn()
-        except NeoError as exc:
+        except self._trips_on as exc:
             with self._lock:
                 self._open_until = self._clock() + self._cooldown_s
                 self._last_error = exc
@@ -61,3 +70,23 @@ class CircuitBreaker:
         with self._lock:
             self._open_until = 0.0
             self._last_error = None
+
+
+class GuardedOrbitSource:
+    """An :class:`application.ports.OrbitSource` behind a breaker.
+
+    While the breaker is open, lookups fail at once with :class:`UpstreamUnavailable`,
+    so :class:`application.enrich_orbit.OrbitEnricher` serves a stale cached orbit
+    exactly as it would if NASA had failed. Give the breaker ``trips_on=(UpstreamError,)``
+    so an asteroid without an orbit doesn't block lookups of the others.
+    """
+
+    def __init__(self, source: OrbitSource, breaker: CircuitBreaker) -> None:
+        self._source = source
+        self._breaker = breaker
+
+    def fetch_orbit(self, neo_reference_id: str) -> OrbitData:
+        try:
+            return self._breaker.call(lambda: self._source.fetch_orbit(neo_reference_id))
+        except SourceCoolingDown as exc:
+            raise UpstreamUnavailable(f"NASA {exc}") from exc

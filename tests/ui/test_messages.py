@@ -2,8 +2,10 @@
 
 from datetime import UTC, date, datetime, timedelta
 
-from planetary_defense.domain.models import IngestionRun, PipelineStatus, RunStatus
-from planetary_defense.ui.messages import run_health
+from planetary_defense.domain.models import IngestionRun, OrbitLookup, OrbitOrigin, PipelineStatus, RunStatus
+from planetary_defense.ui.messages import orbit_status, run_health
+
+from fakes import zoozve_orbit
 
 NOW = datetime(2026, 11, 22, 12, 0, tzinfo=UTC)
 
@@ -49,3 +51,19 @@ def test_failed_and_partial_runs_name_the_cause_and_the_last_success():
 def test_unknown_error_category_still_reads_well():
     health = run_health(PipelineStatus(a_run(RunStatus.FAILED, 1, "SomethingNew"), None), NOW)
     assert "an unexpected error" in health.text
+
+
+
+def test_orbit_status_says_where_the_orbit_came_from():
+    def lookup(origin: OrbitOrigin, hours_ago: float, note: str | None = None) -> OrbitLookup:
+        return OrbitLookup(zoozve_orbit(), NOW - timedelta(hours=hours_ago), origin, note)
+
+    assert orbit_status(lookup(OrbitOrigin.NASA, 0), NOW) == "Orbit fetched from NASA just now."
+    assert "local cache, fetched from NASA 3 days ago" in orbit_status(lookup(OrbitOrigin.CACHE, 72), NOW)
+    stale = orbit_status(lookup(OrbitOrigin.STALE_CACHE, 24 * 45, "NASA could not be reached."), NOW)
+    assert stale.startswith("Stale orbit") and stale.endswith("NASA could not be reached.")
+
+
+def test_time_ago_uses_singular_for_one_hour():
+    run = a_run(RunStatus.SUCCESS, hours_ago=1.2)
+    assert "(1 hour ago)" in run_health(PipelineStatus(run, run.finished_at), NOW).text

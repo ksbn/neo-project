@@ -23,6 +23,7 @@ from planetary_defense.domain.models import (
     OrbitData,
     Overview,
     PipelineStatus,
+    Severity,
     UpsertResult,
 )
 
@@ -88,3 +89,9 @@ class OrbitCache(Protocol):
     def get_orbit(self, neo_reference_id: str) -> CachedOrbit | None: ...
 
     def put_orbit(self, orbit: CachedOrbit) -> None: ...
+
+
+class AlertReader(Protocol):
+    """Reads stored alerts, most urgent first (read side)."""
+
+    def recent_alerts(self, min_severity: Severity, limit: int) -> list[AnomalyAlert]: ...

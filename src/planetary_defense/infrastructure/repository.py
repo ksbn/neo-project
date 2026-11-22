@@ -47,6 +47,7 @@ from planetary_defense.domain.models import (
     UpsertResult,
     latest,
 )
+from planetary_defense.domain.units import km_to_ld
 
 __all__ = ["AlertRepository", "AsteroidRepository", "IngestionRunRepository", "OrbitRepository", "UpsertResult"]
 
@@ -78,6 +79,7 @@ SUMMARY_COLUMNS: Final = (
     "is_potentially_hazardous",
     "close_approach_date",
     "miss_distance_km",
+    "relative_velocity_km_s",
 )
 
 
@@ -247,8 +249,12 @@ class AsteroidRepository:
         """Totals over the whole table (not limited like :meth:`list_recent`)."""
         query = """
             SELECT COUNT(*), COUNT(*) FILTER (WHERE is_potentially_hazardous), MAX(close_approach_date),
-                   (SELECT COUNT(*) FROM close_approaches)
-            FROM asteroids
+                   h.passes, h.closest_km, h.fastest_km_s
+            FROM asteroids,
+                 (SELECT COUNT(*) AS passes, MIN(miss_distance_km) AS closest_km,
+                         MAX(relative_velocity_km_s) AS fastest_km_s
+                  FROM close_approaches) AS h
+            GROUP BY h.passes, h.closest_km, h.fastest_km_s
         """
         try:
             with self._conn.transaction(), self._conn.cursor() as cur:
@@ -258,7 +264,12 @@ class AsteroidRepository:
             raise _storage_error("Overview", exc) from exc
         if row is None:  # an aggregate always returns one row
             return Overview(total=0, hazardous=0, latest_approach=None)
-        return Overview(total=int(row[0]), hazardous=int(row[1]), latest_approach=row[2], approaches=int(row[3]))
+        total, hazardous, latest, passes, closest_km, fastest = row
+        return Overview(
+            total=int(total), hazardous=int(hazardous), latest_approach=latest, approaches=int(passes),
+            closest_miss_ld=km_to_ld(float(closest_km)) if closest_km is not None else None,
+            fastest_km_s=float(fastest) if fastest is not None else None,
+        )
 
     def list_recent(self, limit: int = 5_000) -> list[AsteroidSummary]:
         """The newest ``limit`` asteroids by close approach."""
@@ -311,6 +322,7 @@ def _summary(row: dict[str, Any]) -> AsteroidSummary:
         is_potentially_hazardous=bool(row["is_potentially_hazardous"]),
         close_approach_date=row["close_approach_date"],
         miss_distance_km=num(row["miss_distance_km"]),
+        relative_velocity_km_s=num(row["relative_velocity_km_s"]),
     )
 
 
@@ -452,7 +464,7 @@ _ALERT_PRUNE_SQL: Final = """
 
 
 class AlertRepository:
-    """The ``anomaly_alerts`` table. Satisfies :class:`application.ports.AlertStore`."""
+    """The ``anomaly_alerts`` table. Satisfies :class:`application.ports.AlertStore` and ``AlertReader``."""
 
     def __init__(self, conn: psycopg.Connection) -> None:
         self._conn = conn

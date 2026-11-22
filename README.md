@@ -101,14 +101,17 @@ venv/bin/streamlit run app.py   # or `streamlit run app.py` with venv activated
 
 Use the same `venv` as the pipeline (`scripts/run_pipeline.sh` runs `venv/bin/python`), so the dashboard and the pipeline always run the same library versions.
 
-It shows:
+It opens the **Planetary Defense Control Room**:
 
 * **Pipeline status:** when the last run finished and what it saved, a warning if the data is older than 36 hours, or why the last run failed.
-* **Totals** over the whole database (computed in SQL), including the number of close approaches recorded.
-* **The newest 5,000 asteroids**, searchable and filterable.
-* **Close approach history** of any asteroid in the filtered table: every pass the pipeline has recorded.
+* **KPI bar** over the whole database (computed in SQL): tracked NEOs, potentially hazardous, closest pass (LD), fastest pass (km/s), warnings and critical alerts.
+* **Alerts panel:** the stored anomaly alerts, most urgent first, filterable by severity.
+* **Close approaches:** the newest 5,000 asteroids with miss distance in LD, searchable and filterable.
+* **Inspector:** select a row in either table (or pick from its list) to see the asteroid's latest pass, its alerts, its orbit (orbit class, elements, period, Earth MOID, and whether it came from the local cache or NASA), and its recorded approach history.
 
-If the database is unavailable or empty it falls back to the live NASA API (last 3 days, one quick retry, so the page never waits minutes on a rate limit). Pipeline status and history come from the database only.
+If the database is unavailable or empty it falls back to the live NASA API (last 3 days, one quick retry, so the page never waits minutes on a rate limit), and scores alerts on the fly. Pipeline status and history come from the database only. Each part degrades on its own: if, say, the alerts table doesn't exist yet, the rest of the page still loads.
+
+After each pipeline run, the orbits of that run's warning and critical asteroids are fetched into the local cache (`--no-warm-orbits` turns this off), so the asteroids you are most likely to inspect open without waiting on NASA.
 
 Failures are not cached, so the page recovers as soon as a source is back, but a source that just failed is skipped for a cooldown (database 30 s, NASA 120 s) so that clicking around a degraded page stays instant. **Refresh data** clears the caches and the cooldowns. The Diagnostics panel in the sidebar says why a source was skipped.
 
@@ -141,8 +144,10 @@ src/planetary_defense/
 │   ├── repository.py       # Asteroid, IngestionRun, Orbit (cache) and Alert repositories
 │   └── error_boundary.py   # CircuitBreaker for interactive callers
 └── ui/
-    ├── app.py              # Dashboard wiring (sources, caches, breakers) and rendering
-    └── messages.py         # How the dashboard words errors and pipeline status
+    ├── app.py              # LiveDashboard (sources, caches, breakers) and the page layout (render)
+    ├── state.py            # Which asteroid the inspector shows (shared by tables and picker)
+    ├── messages.py         # How the dashboard words errors, pipeline status and orbit provenance
+    └── components/         # kpi_bar, alerts_panel, approach_table, inspector_drawer
 ```
 
 Adapters translate library exceptions (`requests`, `pydantic`, `psycopg`) into `NeoError` subclasses. Entry points catch only `NeoError`; anything else is a bug and crashes with a traceback instead of being reported as an outage. How an error is presented is decided by each entry point: `cli.CLI_OUTCOMES` (exit code and log label) and `ui.messages.UI_MESSAGES` (dashboard text).
@@ -183,7 +188,7 @@ pytest
 
 Run `pyright` with the venv activated (or `pyright --pythonpath venv/bin/python`), so it sees the installed libraries.
 
-Tests mirror the package: `tests/domain/`, `tests/application/`, `tests/infrastructure/`, `tests/ui/`, plus `tests/test_cli.py` (arguments and exit codes end to end) and `tests/test_config.py`. Shared NeoWs payload builders live in `tests/support.py`, and in-memory fakes for every port in `tests/fakes.py`.
+Tests mirror the package: `tests/domain/`, `tests/application/`, `tests/infrastructure/`, `tests/ui/` (including the whole page rendered with Streamlit's `AppTest` and a fake dashboard), plus `tests/test_cli.py` (arguments and exit codes end to end) and `tests/test_config.py`. Shared NeoWs payload builders live in `tests/support.py`, and in-memory fakes for every port in `tests/fakes.py`.
 
 Database tests use the PostgreSQL from `.env` but never touch your data: they build a throwaway schema from `db/migrations/`, roll back every test, and drop the schema afterwards. If PostgreSQL isn't running, they are skipped.
 

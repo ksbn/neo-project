@@ -20,7 +20,7 @@ from planetary_defense.domain.models import RunStatus, Severity
 from planetary_defense.infrastructure.nasa_client import BASE_URL, NeoWsClient
 from planetary_defense.infrastructure.repository import AlertRepository, AsteroidRepository, IngestionRunRepository
 
-from fakes import AlertStoreSpy, RunLogSpy
+from fakes import AlertStoreSpy, FakeOrbitSource, InMemoryOrbitCache, InMemoryStore, RunLogSpy
 from support import INVALID_KEY, make_feed, make_neo
 
 FEED = f"{BASE_URL}/feed"
@@ -42,6 +42,8 @@ def run(argv, *, env=ENV, open_feed=fast_feed, open_store=no_store, run_log: Run
         argv, settings=Settings(env), open_feed=open_feed, open_store=open_store,
         open_run_log=lambda settings: nullcontext(log),
         open_alert_store=lambda settings: nullcontext(AlertStoreSpy()),
+        open_orbit_cache=lambda settings: nullcontext(InMemoryOrbitCache()),
+        open_orbit_source=lambda settings: nullcontext(FakeOrbitSource()),
     )
 
 
@@ -305,3 +307,57 @@ def test_dry_run_scores_no_alerts():
 
 def test_bad_thresholds_stop_the_run_before_fetching():
     assert run(["--start", "2026-11-01", "--dry-run"], env={**ENV, "ALERT_CRITICAL_LD": "99"}) == ExitCode.CONFIG_ERROR
+
+
+# --------------------------------------------------------------------------- #
+# Warming orbits for the most urgent alerts
+# --------------------------------------------------------------------------- #
+
+
+def warm_run(argv, env, cache, source, alert_store=None) -> int:
+    return main(
+        argv, settings=Settings(env), open_feed=fast_feed, open_store=lambda s: nullcontext(InMemoryStore()),
+        open_run_log=lambda s: nullcontext(RunLogSpy()),
+        open_alert_store=lambda s: nullcontext(alert_store or AlertStoreSpy()),
+        open_orbit_cache=lambda s: nullcontext(cache), open_orbit_source=lambda s: nullcontext(source),
+    )
+
+
+@responses.activate
+def test_orbits_of_warning_alerts_are_warmed_after_a_run():
+    responses.get(FEED, json=week_feed(date(2026, 11, 1), "a"))  # every test NEO passes at 11.9 LD
+    cache, source = InMemoryOrbitCache(), FakeOrbitSource()
+    env = {**ENV, "ALERT_WARNING_LD": "12", "ALERT_WATCH_LD": "12"}  # so they all raise a warning
+
+    assert warm_run(["--start", "2026-11-01", "--end", "2026-11-07"], env, cache, source) == ExitCode.OK
+    assert sorted(source.calls) == sorted(f"a{i}" for i in range(7))
+    assert set(cache.orbits) == set(source.calls)
+
+
+@responses.activate
+def test_no_warming_without_warning_alerts_or_when_disabled():
+    responses.get(FEED, json=week_feed(date(2026, 11, 1), "a"))
+    source = FakeOrbitSource()
+    assert warm_run(["--start", "2026-11-01", "--end", "2026-11-07"], ENV, InMemoryOrbitCache(), source) == 0
+    assert source.calls == []  # 11.9 LD raises nothing at the default thresholds
+
+    env = {**ENV, "ALERT_WARNING_LD": "12", "ALERT_WATCH_LD": "12"}
+    argv = ["--start", "2026-11-01", "--end", "2026-11-07", "--no-warm-orbits"]
+    assert warm_run(argv, env, InMemoryOrbitCache(), source) == ExitCode.OK
+    assert source.calls == []
+
+
+@responses.activate
+def test_a_failing_orbit_cache_does_not_fail_the_run(caplog):
+    responses.get(FEED, json=week_feed(date(2026, 11, 1), "a"))
+    env = {**ENV, "ALERT_WARNING_LD": "12", "ALERT_WATCH_LD": "12"}
+
+    def broken_cache(settings):
+        raise StorageError("connection refused")
+
+    code = main(["--start", "2026-11-01", "--end", "2026-11-07"], settings=Settings(env), open_feed=fast_feed,
+                open_store=lambda s: nullcontext(InMemoryStore()), open_run_log=lambda s: nullcontext(RunLogSpy()),
+                open_alert_store=lambda s: nullcontext(AlertStoreSpy()), open_orbit_cache=broken_cache,
+                open_orbit_source=lambda s: nullcontext(FakeOrbitSource()))
+    assert code == ExitCode.OK
+    assert "Skipped warming orbits" in caplog.text

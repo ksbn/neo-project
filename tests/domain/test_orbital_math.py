@@ -11,12 +11,14 @@ from planetary_defense.domain.orbital_math import (
     EARTH,
     J2000,
     approach_trajectory,
+    date_from_jd,
     earth_position,
     geocentric_position,
     heliocentric_position,
     julian_day,
     mean_motion,
     orbit_path,
+    orbital_period_days,
     solve_kepler,
 )
 from planetary_defense.domain.units import AU_KM, LUNAR_DISTANCE_KM, au_to_ld, km_to_ld
@@ -228,3 +230,14 @@ def test_trajectory_rejects_meaningless_arguments(bad):
 
 def au_vec_to_ld(v: Vec3) -> tuple[float, float, float]:
     return (au_to_ld(v[0]), au_to_ld(v[1]), au_to_ld(v[2]))
+
+
+def test_date_from_jd_inverts_julian_day():
+    assert date_from_jd(2461200.5) == date(2026, 6, 9)  # Zoozve's osculation epoch
+    assert date_from_jd(J2000) == date(2000, 1, 1)
+    for day in (date(1999, 12, 31), date(2026, 11, 22), date(2100, 3, 1)):
+        assert date_from_jd(julian_day(day)) == day
+
+
+def test_orbital_period_matches_nasa_for_zoozve():
+    assert orbital_period_days(0.72356318914361) == pytest.approx(224.8087, abs=1e-3)  # NASA: 224.8087046820664
