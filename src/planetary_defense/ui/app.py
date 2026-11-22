@@ -36,7 +36,7 @@ from planetary_defense.infrastructure.repository import (
     OrbitRepository,
 )
 from planetary_defense.ui import theme
-from planetary_defense.ui.components import alerts_panel, approach_table, command_header, inspector_drawer, kpi_strip
+from planetary_defense.ui.components import approach_table, command_header, hazard_alerts, kpi_strip, orbit_stage
 from planetary_defense.ui.messages import describe, run_health, sync_message
 
 DB_COOLDOWN_S = 30
@@ -214,12 +214,12 @@ def render(data: DashboardData) -> None:
     view = result.view
     kpi_strip.render(view)
     render_status(view)
-    left, right = st.columns([3, 2], gap="large")
+    left, right = st.columns([5, 6], gap="medium")
     with left:
-        alerts_panel.render(view)
+        hazard_alerts.render(view)
         approach_table.render(view)
     with right:
-        inspector_drawer.render(view, data)
+        orbit_stage.render(view, data)
 
 
 def main() -> None:

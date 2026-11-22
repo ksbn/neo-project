@@ -1,8 +1,10 @@
 """The Control Room page (ui/app.py render + components), driven by Streamlit's AppTest with a fake dashboard."""
 
+import pytest
 from streamlit.testing.v1 import AppTest
 
 from planetary_defense.domain.models import Severity
+from planetary_defense.domain.units import LUNAR_DISTANCE_KM
 
 
 def page(live: bool = False, empty: bool = False, orbit_fails: bool = False) -> None:
@@ -36,46 +38,61 @@ def test_kpi_strip_has_the_four_cards_from_stored_data():
     assert "NOMINAL" in text and "Last sync 2026-11-22 08:00 UTC" in text
 
 
-def test_healthy_runs_need_no_banner_and_alerts_panel_filters():
+def test_healthy_runs_need_no_banner_and_hazard_alerts_filter():
     at = run()
     assert not at.main.success  # the readiness card shows the healthy state instead
-    alerts = at.dataframe[0].value  # watch-or-worse by default: the info alert is hidden
-    assert list(alerts["severity"]) == ["Warning", "Watch"]
+    text = page_html(at)
+    assert "WARNING" in text and "WATCH" in text and "Classified by NASA" not in text  # info hidden by default
+    assert "2026-11-02 UTC" in text and "≤ 450 m" in text  # pass time and estimated size on the card
 
     at.selectbox(key="alert_floor").set_value(Severity.INFO).run()
-    assert len(at.dataframe[0].value) == 3
+    assert "Classified by NASA" in page_html(at)
     at.selectbox(key="alert_floor").set_value(Severity.CRITICAL).run()
     assert any("No critical-or-worse alerts" in c.value for c in at.caption)
 
 
-def test_inspector_opens_on_the_most_urgent_alert():
+def test_close_approach_table_has_the_spec_columns_in_display_units():
     at = run()
-    assert at.selectbox(key="inspect_neo").value == "2524522"
-    assert any("Potentially hazardous asteroid" in m.value for m in at.markdown)
-    assert any("local cache" in c.value for c in at.caption)
-    orbit = at.dataframe[2].value  # alerts, approaches, orbit
-    assert dict(zip(orbit["Element"], orbit["Value"], strict=True))["Orbit class"] == "ATE"
-    assert any("2 recorded approaches" in c.value for c in at.caption)
+    table = at.dataframe[0].value
+    assert list(table["Object Name"]) == ["524522 Zoozve (2002 VE68)", "(2019 BG3)", "(2001 KF54)"]
+    assert table["Distance (LD)"].iloc[0] == pytest.approx(6_019_000 / LUNAR_DISTANCE_KM)
+    assert table["Diameter (m)"].iloc[0] == pytest.approx(450.0)
 
 
-def test_picking_another_asteroid_updates_the_inspector():
+def test_stage_opens_on_the_most_urgent_alert_with_telemetry():
     at = run()
-    at.selectbox(key="inspect_neo").set_value("b").run()
-    assert not at.exception
-    assert metrics(at)["Velocity"] == "36.9 km/s"
-    assert any("Relative velocity 36.9 km/s" in m.value for m in at.markdown)
+    assert at.selectbox(key="selected_neo_id").value == "2524522"
+    text = page_html(at)
+    assert "Inclination" in text and "9.037°" in text  # from the cached orbit
+    assert "15.65 LD · 6,019,000 km" in text  # minimum Earth distance
+    assert "Live Feed" in text and "Data Synced 08:00 UTC" in text and "Orbit: cache" in text
 
 
-def test_orbit_failure_is_explained_not_fatal():
+def test_track_button_and_picker_change_the_tracked_asteroid():
+    at = run()
+    track_b = next(b for b in at.button if b.key and b.key.endswith("_b_high_velocity"))
+    track_b.click().run()
+    assert at.selectbox(key="selected_neo_id").value == "b"
+    (payload,) = viewport_payloads(at)
+    assert payload["name"] == "(2019 BG3)" and payload["hazardous"] is False
+
+    at.selectbox(key="selected_neo_id").set_value("a").run()
+    assert "ID a" in page_html(at)
+
+
+def test_orbit_failure_falls_back_to_an_approximate_pass():
     at = run(orbit_fails=True)
-    assert any("Orbit unavailable" in i.value and "none is cached" in i.value for i in at.info)
-    assert any("recorded approaches" in c.value for c in at.caption)  # the rest of the inspector still renders
+    assert any("Orbit unavailable" in w.value and "approximate" in w.value for w in at.warning)
+    (payload,) = viewport_payloads(at)
+    assert payload["approximate"] is True and payload["sun"] is None
+    assert "Orbit unavailable" in page_html(at)  # the telemetry status shows the error state
 
 
 def test_live_fallback_mode_says_so_and_hides_history():
     at = run(live=True)
     assert any("Showing live NASA data" in i.value for i in at.info)
     assert any("only available from the database" in c.value for c in at.caption)
+    assert "NASA Fallback" in page_html(at)
 
 
 def test_no_data_at_all_shows_a_warning_and_diagnostics():
@@ -93,20 +110,11 @@ def viewport_payloads(at: AppTest) -> list[dict]:
     return [json.loads(m.group(1)) for m in found if m]
 
 
-def test_inspector_shows_the_3d_view_of_the_selected_asteroid():
-    at = run()
-    (payload,) = viewport_payloads(at)
+def test_viewport_shows_the_tracked_asteroid():
+    (payload,) = viewport_payloads(run())
     assert payload["name"] == "524522 Zoozve (2002 VE68)" and payload["hazardous"] is True
     assert payload["default_mode"] == "earth" and payload["earth"]["approach_date"] == "2026-11-02"
-    assert "local cache" in payload["provenance"]
-
-    at.selectbox(key="inspect_neo").set_value("b").run()
-    (payload,) = viewport_payloads(at)
-    assert payload["name"] == "(2019 BG3)" and payload["hazardous"] is False
-
-
-def test_no_3d_view_without_an_orbit():
-    assert viewport_payloads(run(orbit_fails=True)) == []
+    assert "local cache" in payload["provenance"] and payload["approximate"] is False
 
 
 def test_command_header_and_non_blocking_sync_failure():

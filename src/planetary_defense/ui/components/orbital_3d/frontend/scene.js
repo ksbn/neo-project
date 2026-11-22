@@ -190,7 +190,9 @@ function buildEarthView(e) {
       <p><span class="swatch" style="background:#${COLORS.asteroid.toString(16)}"></span>
          Path ${e.window_days} days either side of the pass on ${e.approach_date}</p>
       <p>Closest approach drawn at NASA's ${fmt(e.miss_ld)} LD
-         <span class="muted">(orbit model alone: ${fmt(e.model_miss_ld)} LD)</span></p>
+         ${payload.approximate ? "" : `<span class="muted">(orbit model alone: ${fmt(e.model_miss_ld)} LD)</span>`}</p>
+      ${payload.approximate ? `<p style="color:#f5c542">No orbit available: a straight-line pass at NASA's distance
+         and speed. The direction is illustrative.</p>` : ""}
       <p class="muted">Earth-centred, J2000 ecliptic plane, lunar distances (1 LD = 1/389 AU).
          Earth enlarged about ${enlargement}x; the path is to scale and approximate.</p>
       <p class="muted">${escapeHtml(payload.provenance)}</p>`,
@@ -253,7 +255,7 @@ scene.add(sunlight);
 
 const views = {};
 if (payload.earth) views.earth = buildEarthView(payload.earth);
-views.sun = buildSunView(payload.sun);
+if (payload.sun) views.sun = buildSunView(payload.sun);
 for (const view of Object.values(views)) {
   view.group.visible = false;
   scene.add(view.group);
@@ -285,7 +287,8 @@ function setMode(next) {
   const view = views[mode];
   view.group.visible = true;
   // Light from the Sun's direction: the origin in the Sun view, roughly "behind" Earth in the Earth view.
-  sunlight.position.copy(mode === "sun" ? new THREE.Vector3() : ecl(payload.sun.earth).negate().normalize().multiplyScalar(1e4));
+  const awayFromSun = payload.sun ? ecl(payload.sun.earth).negate().normalize() : new THREE.Vector3(1, 0.4, 0.6);
+  sunlight.position.copy(mode === "sun" ? new THREE.Vector3() : awayFromSun.multiplyScalar(1e4));
   const saved = savedCameras[mode];
   if (saved) {
     camera.position.copy(saved.position);
@@ -302,7 +305,10 @@ function setMode(next) {
 
 for (const button of document.querySelectorAll("#toolbar button")) {
   button.disabled = !views[button.dataset.mode];
-  if (button.disabled) button.title = "No recorded close approach for this asteroid";
+  if (button.disabled) {
+    button.title = button.dataset.mode === "earth" ? "No recorded close approach for this asteroid"
+                                                   : "No orbit available for this asteroid";
+  }
   button.addEventListener("click", () => setMode(button.dataset.mode));
 }
 setMode(payload.default_mode);

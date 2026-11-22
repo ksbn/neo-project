@@ -218,6 +218,7 @@ class AsteroidSummary:
     close_approach_date: date | None
     miss_distance_km: float | None
     relative_velocity_km_s: float | None = None
+    absolute_magnitude_h: float | None = None
 
 
 @dataclass(frozen=True)

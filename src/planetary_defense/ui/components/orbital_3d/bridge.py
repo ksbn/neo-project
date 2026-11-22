@@ -17,8 +17,8 @@ import json
 from pathlib import Path
 from typing import Any, Final
 
-from planetary_defense.application.enrich_orbit import EarthView, SunView
-from planetary_defense.domain.models import Vec3
+from planetary_defense.application.enrich_orbit import SunView
+from planetary_defense.domain.models import Trajectory3D, Vec3
 from planetary_defense.domain.orbital_math import date_from_jd
 from planetary_defense.domain.units import LUNAR_DISTANCE_KM
 
@@ -37,8 +37,7 @@ def _point(v: Vec3, digits: int) -> list[float]:
     return [round(v.x, digits), round(v.y, digits), round(v.z, digits)]
 
 
-def _earth_section(view: EarthView) -> dict[str, Any]:
-    t = view.trajectory
+def _earth_section(t: Trajectory3D) -> dict[str, Any]:
     return {
         "units": "LD",
         "path": [_point(p, 4) for p in t.points_ld],
@@ -65,17 +64,30 @@ def _sun_section(view: SunView) -> dict[str, Any]:
 
 
 def build_payload(
-    *, name: str, hazardous: bool, provenance: str, earth: EarthView | None, sun: SunView
+    *,
+    name: str,
+    hazardous: bool,
+    provenance: str,
+    trajectory: Trajectory3D | None,
+    sun: SunView | None,
+    approximate: bool = False,
 ) -> dict[str, Any]:
-    """Everything the scene draws. ``earth`` is None when the asteroid has no recorded pass."""
+    """Everything the scene draws.
+
+    ``trajectory`` is None when the asteroid has no recorded pass; ``sun`` is None when there is
+    no orbit. ``approximate`` marks a trajectory that isn't from an orbit (a straight-line pass).
+    """
+    if trajectory is None and sun is None:
+        raise ValueError("nothing to draw: need a trajectory, a Sun view, or both")
     return {
         "version": PAYLOAD_VERSION,
         "name": name,
         "hazardous": hazardous,
         "provenance": provenance,
-        "default_mode": "earth" if earth is not None else "sun",
-        "earth": _earth_section(earth) if earth is not None else None,
-        "sun": _sun_section(sun),
+        "approximate": approximate,
+        "default_mode": "earth" if trajectory is not None else "sun",
+        "earth": _earth_section(trajectory) if trajectory is not None else None,
+        "sun": _sun_section(sun) if sun is not None else None,
     }
 
 

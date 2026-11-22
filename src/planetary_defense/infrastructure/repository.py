@@ -80,6 +80,7 @@ SUMMARY_COLUMNS: Final = (
     "close_approach_date",
     "miss_distance_km",
     "relative_velocity_km_s",
+    "absolute_magnitude_h",
 )
 
 
@@ -337,6 +338,7 @@ def _summary(row: dict[str, Any]) -> AsteroidSummary:
         close_approach_date=row["close_approach_date"],
         miss_distance_km=num(row["miss_distance_km"]),
         relative_velocity_km_s=num(row["relative_velocity_km_s"]),
+        absolute_magnitude_h=num(row["absolute_magnitude_h"]),
     )
 
 

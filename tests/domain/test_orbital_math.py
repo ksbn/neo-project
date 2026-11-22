@@ -241,3 +241,16 @@ def test_date_from_jd_inverts_julian_day():
 
 def test_orbital_period_matches_nasa_for_zoozve():
     assert orbital_period_days(0.72356318914361) == pytest.approx(224.8087, abs=1e-3)  # NASA: 224.8087046820664
+
+
+def test_straight_line_flyby_passes_at_the_miss_distance_at_the_reported_speed():
+    from planetary_defense.domain.orbital_math import straight_line_flyby
+    from planetary_defense.domain.units import LUNAR_DISTANCE_KM
+
+    t = straight_line_flyby(date(2026, 11, 2), 15.65, 9.5, window_days=1, steps_per_day=4)
+    assert len(t.points_ld) == 9 and t.closest_index == 4
+    assert math.dist(t.closest_point_ld, (0, 0, 0)) == pytest.approx(15.65)
+    assert t.closest_time_jd == pytest.approx(julian_day(date(2026, 11, 2)))
+    per_step = math.dist(t.points_ld[5], t.points_ld[4])
+    assert per_step == pytest.approx(9.5 * 86400 / 4 / LUNAR_DISTANCE_KM)  # a quarter day at 9.5 km/s
+    assert t.model_miss_ld == pytest.approx(15.65)  # no orbit model: nothing to compare

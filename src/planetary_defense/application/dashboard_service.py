@@ -88,6 +88,7 @@ def view_from_feed(
             close_approach_date=obs.approach_date,
             miss_distance_km=_float(obs.approach.miss_distance_km) if obs.approach else None,
             relative_velocity_km_s=_float(obs.approach.relative_velocity_km_s) if obs.approach else None,
+            absolute_magnitude_h=_float(obs.asteroid.absolute_magnitude_h),
         )
         for obs in newest
     ]
