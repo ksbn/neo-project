@@ -124,8 +124,11 @@ src/planetary_defense/
 ├── config.py               # Settings: the only code that reads .env / the environment
 ├── cli.py                  # Pipeline entry point: arguments, wiring, CLI_OUTCOMES (exit codes)
 ├── domain/
-│   ├── models.py           # Asteroid, CloseApproach, Observation, latest(), FeedBatch, runs, read models
-│   └── errors.py           # The NeoError hierarchy (classification only)
+│   ├── models.py           # Asteroid, CloseApproach, Observation, latest(), FeedBatch, runs, alerts, orbits
+│   ├── errors.py           # The NeoError hierarchy (classification only)
+│   ├── units.py            # AU and lunar distance (NeoWs convention: 1 LD = 1/389 AU)
+│   ├── anomaly_rules.py    # Composable alert rules (distance tiers, velocity, size, hazard flag) and thresholds
+│   └── orbital_math.py     # Kepler solver, positions, Earth ephemeris, orbit paths, approach trajectories
 ├── application/
 │   ├── ports.py            # Protocols: FeedSource, AsteroidStore, AsteroidReader, RunLog, RunReader
 │   ├── ingest_feed.py      # IngestService, LogObserver, IngestionRunRecorder, DryRunStore
@@ -142,6 +145,20 @@ src/planetary_defense/
 ```
 
 Adapters translate library exceptions (`requests`, `pydantic`, `psycopg`) into `NeoError` subclasses. Entry points catch only `NeoError`; anything else is a bug and crashes with a traceback instead of being reported as an outage. How an error is presented is decided by each entry point: `cli.CLI_OUTCOMES` (exit code and log label) and `ui.messages.UI_MESSAGES` (dashboard text).
+
+### Anomaly rules and orbital math
+
+A rule is any function `Observation -> AnomalyAlert | None`. `anomaly_rules.py` builds the defaults from `AlertThresholds` and combines them with `all_of`, so a new rule is a new function, not a subclass:
+
+| Rule | Default | Severity |
+|---|---|---|
+| `close_approach` | within 1 / 5 / 10 LD | critical / warning / watch |
+| `hazardous_close_pass` | potentially hazardous and within 20 LD | warning |
+| `high_velocity` | at least 30 km/s | watch |
+| `large_diameter` | at least 1 km (largest estimate) | watch |
+| `potentially_hazardous` | NASA's hazard flag | info |
+
+`orbital_math.py` turns Keplerian elements into positions (J2000 ecliptic frame). For the Earth-centred view, `approach_trajectory` takes the asteroid's *direction* from its orbit and Earth's, and its *distance* at closest approach from NASA, because a two-body model is far less accurate than NASA at lunar-distance scale. It also reports what the model alone predicted (`model_miss_ld`), so the UI can say how approximate the drawn path is.
 
 Which close approach is kept is decided in one place, `domain.latest()`. The parser keeps every approach it sees, and the repository stores the newest per asteroid, so keeping the full history later only needs a new table and a second write.
 
