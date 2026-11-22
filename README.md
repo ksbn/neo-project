@@ -95,8 +95,10 @@ The schema step and the data step are separate programs, and `run_pipeline.sh` i
 ### 5. Open the Dashboard (optional)
 
 ```bash
-streamlit run app.py
+venv/bin/streamlit run app.py   # or `streamlit run app.py` with venv activated
 ```
+
+Use the same `venv` as the pipeline (`scripts/run_pipeline.sh` runs `venv/bin/python`), so the dashboard and the pipeline always run the same library versions.
 
 It shows totals over the whole `asteroids` table (computed in SQL) and lists the newest 5,000 rows. If the database is unavailable or empty it falls back to the live NASA API (last 3 days, one quick retry, so the page never waits minutes on a rate limit).
 

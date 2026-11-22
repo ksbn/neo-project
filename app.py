@@ -9,7 +9,7 @@ from dataclasses import asdict
 from datetime import date
 
 import pandas as pd
-import streamlit as st  # pyright: ignore[reportMissingImports]
+import streamlit as st
 
 from client import INTERACTIVE, NeoWsClient
 from config import Settings
