@@ -61,6 +61,28 @@ class SunView:
     earth_position: Vec3
 
 
+def earth_view_from(
+    lookup: OrbitLookup, approach: date | datetime, miss_distance_ld: float, *, window_days: int = 3
+) -> EarthView:
+    """The Earth-centred view of an orbit already looked up (pure geometry, no I/O)."""
+    trajectory = approach_trajectory(lookup.orbit.elements, approach, miss_distance_ld, window_days=window_days)
+    return EarthView(lookup=lookup, trajectory=trajectory)
+
+
+def sun_view_from(lookup: OrbitLookup, on: date | datetime, *, samples: int = 360) -> SunView:
+    """The Sun-centred view of an orbit already looked up, with positions on ``on`` (pure geometry, no I/O)."""
+    jd = julian_day(on)
+    elements = lookup.orbit.elements
+    return SunView(
+        lookup=lookup,
+        on_jd=jd,
+        asteroid_path=orbit_path(elements, samples),
+        earth_path=orbit_path(earth_elements(jd), samples),
+        asteroid_position=heliocentric_position(elements, jd),
+        earth_position=earth_position(jd),
+    )
+
+
 class OrbitEnricher:
     def __init__(
         self,
@@ -110,22 +132,10 @@ class OrbitEnricher:
     def earth_view(
         self, neo_reference_id: str, approach: date | datetime, miss_distance_ld: float, *, window_days: int = 3
     ) -> EarthView:
-        lookup = self.lookup(neo_reference_id)
-        trajectory = approach_trajectory(lookup.orbit.elements, approach, miss_distance_ld, window_days=window_days)
-        return EarthView(lookup=lookup, trajectory=trajectory)
+        return earth_view_from(self.lookup(neo_reference_id), approach, miss_distance_ld, window_days=window_days)
 
     def sun_view(self, neo_reference_id: str, on: date | datetime, *, samples: int = 360) -> SunView:
-        lookup = self.lookup(neo_reference_id)
-        jd = julian_day(on)
-        elements = lookup.orbit.elements
-        return SunView(
-            lookup=lookup,
-            on_jd=jd,
-            asteroid_path=orbit_path(elements, samples),
-            earth_path=orbit_path(earth_elements(jd), samples),
-            asteroid_position=heliocentric_position(elements, jd),
-            earth_position=earth_position(jd),
-        )
+        return sun_view_from(self.lookup(neo_reference_id), on, samples=samples)
 
     def _read_cache(self, neo_reference_id: str) -> CachedOrbit | None:
         try:

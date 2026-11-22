@@ -182,3 +182,23 @@ def test_warm_orbits_counts_a_failed_refresh_of_a_stale_orbit_as_failed():
     source = FakeOrbitSource(fail=UpstreamUnavailable("NASA down"))
     result = warm_orbits(enricher(cached(timedelta(days=60)), source), [an_alert(ZOOZVE, Severity.CRITICAL)])
     assert (result.fetched, result.cached, result.failed) == (0, 0, 1)
+
+
+# --------------------------------------------------------------------------- #
+# Views from an orbit already looked up (no second lookup)
+# --------------------------------------------------------------------------- #
+
+
+def test_views_can_be_built_from_an_existing_lookup():
+    from planetary_defense.application.enrich_orbit import earth_view_from, sun_view_from
+
+    source = FakeOrbitSource()
+    lookup = enricher(cached(timedelta(days=1)), source).lookup(ZOOZVE)
+
+    earth = earth_view_from(lookup, date(2026, 11, 2), km_to_ld(6_019_000))
+    sun = sun_view_from(lookup, date(2026, 11, 2), samples=60)
+
+    assert source.calls == []  # pure geometry: nothing fetched
+    assert earth.lookup is lookup and sun.lookup is lookup
+    assert earth.trajectory.model_miss_ld == pytest.approx(15.67, abs=0.05)
+    assert len(sun.asteroid_path) == 61

@@ -78,3 +78,28 @@ def test_no_data_at_all_shows_a_warning_and_diagnostics():
     at = run(empty=True)
     assert any("Unable to fetch asteroid data" in w.value for w in at.warning)
     assert [c.value for c in at.sidebar.caption] == ["PostgreSQL database: unavailable", "NASA: unavailable"]
+
+
+def viewport_payloads(at: AppTest) -> list[dict]:
+    import json
+    import re
+
+    docs = [frame.proto.srcdoc for frame in at.get("iframe")]
+    found = [re.search(r'<script type="application/json" id="payload">(.*?)</script>', d, re.S) for d in docs]
+    return [json.loads(m.group(1)) for m in found if m]
+
+
+def test_inspector_shows_the_3d_view_of_the_selected_asteroid():
+    at = run()
+    (payload,) = viewport_payloads(at)
+    assert payload["name"] == "524522 Zoozve (2002 VE68)" and payload["hazardous"] is True
+    assert payload["default_mode"] == "earth" and payload["earth"]["approach_date"] == "2026-11-02"
+    assert "local cache" in payload["provenance"]
+
+    at.selectbox(key="inspect_neo").set_value("b").run()
+    (payload,) = viewport_payloads(at)
+    assert payload["name"] == "(2019 BG3)" and payload["hazardous"] is False
+
+
+def test_no_3d_view_without_an_orbit():
+    assert viewport_payloads(run(orbit_fails=True)) == []
