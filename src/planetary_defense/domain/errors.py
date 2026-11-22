@@ -54,3 +54,10 @@ class FeedContractError(UpstreamError):
 
 class StorageError(NeoError):
     """PostgreSQL could not be reached, or a statement failed."""
+
+
+class OrbitUnavailable(NeoError):
+    """No usable orbit for an asteroid.
+
+    NASA has none, it isn't elliptical, or NASA is unreachable and none is cached.
+    """

@@ -4,6 +4,7 @@ See conftest.py: each test runs inside a rolled-back transaction in a
 throwaway schema built from db/migrations, so these never touch real data.
 """
 
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import LiteralString, cast
@@ -12,19 +13,31 @@ import pytest
 
 from planetary_defense.config import DbConfig
 from planetary_defense.domain.errors import StorageError
-from planetary_defense.domain.models import ApproachSummary, IngestionRun, Overview, PipelineStatus, RunStatus
+from planetary_defense.domain.models import (
+    AnomalyAlert,
+    ApproachSummary,
+    CachedOrbit,
+    IngestionRun,
+    Overview,
+    PipelineStatus,
+    RunStatus,
+    Severity,
+)
 from planetary_defense.infrastructure import nasa_dto
 from planetary_defense.infrastructure.db import connect
 from planetary_defense.infrastructure.nasa_dto import parse_feed
 from planetary_defense.infrastructure.repository import (
     COLUMNS,
+    AlertRepository,
     AsteroidRepository,
     IngestionRunRepository,
+    OrbitRepository,
     UpsertResult,
     _row,
 )
 from planetary_defense.ui.messages import describe
 
+from fakes import zoozve_orbit
 from support import make_feed, make_neo, migration_up_sql
 
 
@@ -253,3 +266,95 @@ def test_status_and_error_must_agree(conn):
     """The table rejects a 'success' with an error, so a recorder bug can't hide a failure."""
     with pytest.raises(StorageError, match="chk_ingestion_runs_error"):
         IngestionRunRepository(conn).record(a_run(RunStatus.SUCCESS, T0, error_category="StorageError"))
+
+
+# --------------------------------------------------------------------------- #
+# Orbit cache (orbital_elements)
+# --------------------------------------------------------------------------- #
+
+
+def test_orbit_cache_round_trip_and_refresh(conn):
+    cache = OrbitRepository(conn)
+    assert cache.get_orbit("2524522") is None
+
+    first = CachedOrbit(orbit=zoozve_orbit(), fetched_at=T0)
+    cache.put_orbit(first)
+    assert cache.get_orbit("2524522") == first
+
+    refined_orbit = replace(zoozve_orbit(), orbit_id="112", moid_au=None)
+    refined = CachedOrbit(orbit=refined_orbit, fetched_at=T0 + timedelta(days=40))
+    cache.put_orbit(refined)
+    assert cache.get_orbit("2524522") == refined
+    assert conn.execute("SELECT COUNT(*) FROM orbital_elements").fetchone() == (1,)
+
+
+def test_orbits_need_no_stored_asteroid(conn):
+    """The live NASA fallback can show asteroids that were never ingested; their orbits are cacheable too."""
+    OrbitRepository(conn).put_orbit(CachedOrbit(orbit=replace(zoozve_orbit(), neo_reference_id="99"), fetched_at=T0))
+    assert OrbitRepository(conn).get_orbit("99") is not None
+
+
+# --------------------------------------------------------------------------- #
+# Alerts (anomaly_alerts)
+# --------------------------------------------------------------------------- #
+
+D10, D12 = date(2026, 11, 10), date(2026, 11, 12)
+
+
+def alert(ref: str, day: date, rule: str, severity: Severity, value: float | None = 1.0) -> AnomalyAlert:
+    return AnomalyAlert(rule, severity, ref, "ignored: names come from asteroids", day, f"{rule} for {ref}", value, 2.0)
+
+
+@pytest.fixture
+def two_asteroids(conn):
+    AsteroidRepository(conn).save(records(make_neo("1"), make_neo("2")))
+    return AlertRepository(conn)
+
+
+def test_alerts_are_stored_and_listed_most_urgent_first(two_asteroids):
+    two_asteroids.replace_alerts(
+        [("1", D10), ("2", D10)],
+        [alert("1", D10, "high_velocity", Severity.WATCH), alert("2", D10, "close_approach", Severity.CRITICAL),
+         alert("1", D10, "potentially_hazardous", Severity.INFO, value=None)],
+    )
+
+    listed = two_asteroids.recent_alerts()
+    assert [(a.neo_reference_id, a.rule, a.severity) for a in listed] == [
+        ("2", "close_approach", Severity.CRITICAL), ("1", "high_velocity", Severity.WATCH),
+        ("1", "potentially_hazardous", Severity.INFO),
+    ]
+    assert listed[0].name == "2 (Test)" and listed[0].close_approach_date == D10  # name from asteroids
+    assert listed[2].value is None and listed[0].threshold == 2.0
+
+    assert [a.rule for a in two_asteroids.recent_alerts(min_severity=Severity.WATCH)] == ["close_approach",
+                                                                                           "high_velocity"]
+    assert len(two_asteroids.recent_alerts(limit=1)) == 1
+
+
+def test_replacing_a_pass_updates_removes_and_leaves_other_passes_alone(conn, two_asteroids):
+    two_asteroids.replace_alerts(
+        [("1", D10), ("2", D12)],
+        [alert("1", D10, "high_velocity", Severity.WATCH), alert("1", D10, "large_diameter", Severity.WATCH),
+         alert("2", D12, "high_velocity", Severity.WATCH)],
+    )
+    (raised_at,) = conn.execute("SELECT raised_at FROM anomaly_alerts WHERE rule = 'high_velocity' AND "
+                                "neo_reference_id = '1'").fetchone()
+
+    # Re-ingest only asteroid 1's pass: high_velocity still fires (new value), large_diameter no longer does.
+    two_asteroids.replace_alerts([("1", D10)], [alert("1", D10, "high_velocity", Severity.WATCH, value=9.0)])
+
+    rows = {(a.neo_reference_id, a.rule): a.value for a in two_asteroids.recent_alerts()}
+    assert rows == {("1", "high_velocity"): 9.0, ("2", "high_velocity"): 1.0}
+    assert conn.execute("SELECT raised_at FROM anomaly_alerts WHERE rule = 'high_velocity' AND "
+                        "neo_reference_id = '1'").fetchone() == (raised_at,)  # first raised, kept
+
+
+def test_a_pass_with_no_alerts_left_is_cleared(two_asteroids):
+    two_asteroids.replace_alerts([("1", D10)], [alert("1", D10, "high_velocity", Severity.WATCH)])
+    two_asteroids.replace_alerts([("1", D10)], [])
+    assert two_asteroids.recent_alerts() == []
+
+
+def test_alerts_must_belong_to_a_stored_asteroid(two_asteroids):
+    with pytest.raises(StorageError):
+        two_asteroids.replace_alerts([("404", D10)], [alert("404", D10, "high_velocity", Severity.WATCH)])

@@ -5,8 +5,9 @@ pydantic, ``.env`` or exit codes. Collaborators are composed in:
 
 * a :class:`application.ports.FeedSource` and an :class:`application.ports.AsteroidStore`
   (:class:`DryRunStore` for ``--dry-run``), and
-* any number of :class:`RunObserver`s, which is how logging (:class:`LogObserver`)
-  and run recording (:class:`IngestionRunRecorder`) plug in without changing the service.
+* any number of :class:`RunObserver`s, which is how logging (:class:`LogObserver`),
+  run recording (:class:`IngestionRunRecorder`) and alert scoring
+  (:class:`AlertRecorder`) plug in without changing the service.
 """
 
 from __future__ import annotations
@@ -17,7 +18,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Protocol
 
-from planetary_defense.application.ports import AsteroidStore, FeedSource, RunLog
+from planetary_defense.application.ports import AlertStore, AsteroidStore, FeedSource, RunLog
+from planetary_defense.domain.anomaly_rules import Rule, evaluate
 from planetary_defense.domain.errors import NeoError, StorageError
 from planetary_defense.domain.models import (
     FeedBatch,
@@ -44,6 +46,7 @@ class WindowReport:
     invalid: list[InvalidObject] = field(default_factory=list)
     missing_dates: list[date] = field(default_factory=list)
     upsert: UpsertResult = field(default_factory=UpsertResult)
+    observations: list[Observation] = field(default_factory=list)  # what the window fetched, for scoring
 
 
 @dataclass
@@ -152,6 +155,7 @@ class IngestService:
             invalid=batch.invalid,
             missing_dates=_missing_dates(window_start, window_end, batch.feed_dates),
             upsert=upsert,
+            observations=batch.observations,
         )
 
     def _finished(self, stats: PipelineStats, error: NeoError | None) -> None:
@@ -262,3 +266,40 @@ class IngestionRunRecorder:
 def _missing_dates(start: date, end: date, present: frozenset[date]) -> list[date]:
     requested = {start + timedelta(days=i) for i in range((end - start).days + 1)}
     return sorted(requested - present)
+
+
+class AlertRecorder:
+    """Scores each window with the anomaly rules and stores the alerts (Tier 1: ingest -> rules -> SQL).
+
+    Each window's passes get their complete, current set of alerts, so re-running
+    a date range applies changed rules or thresholds. Best effort: alerts are
+    derived data, so a failure to save them is logged and the run goes on.
+    """
+
+    def __init__(self, rules: Iterable[Rule], store: AlertStore) -> None:
+        self._rules = tuple(rules)
+        self._store = store
+        self.raised = 0
+
+    def run_started(self, stats: PipelineStats) -> None:
+        pass
+
+    def window_done(self, report: WindowReport) -> None:
+        dated = [obs for obs in report.observations if obs.approach_date is not None]
+        passes = [(obs.neo_reference_id, obs.approach_date) for obs in dated if obs.approach_date is not None]
+        alerts = evaluate(dated, self._rules)
+        try:
+            self._store.replace_alerts(passes, alerts)
+        except StorageError as exc:
+            logger.warning("Could not save alerts for %s..%s: %s", report.start, report.end, exc)
+            return
+        self.raised += len(alerts)
+        if alerts:
+            by_severity = ", ".join(
+                f"{sum(a.severity is s for a in alerts)} {s.name.lower()}"
+                for s in sorted({a.severity for a in alerts}, reverse=True)
+            )
+            logger.info("%s..%s: %d alerts (%s)", report.start, report.end, len(alerts), by_severity)
+
+    def run_finished(self, stats: PipelineStats, error: NeoError | None) -> None:
+        pass

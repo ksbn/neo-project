@@ -57,3 +57,40 @@ def migration_up_sql() -> list[str]:
             raise ValueError(f"{path.name} has no '-- migrate:up' section")
         sections.append(match.group(1))
     return sections
+
+
+# Zoozve (2002 VE68), as /neo/2524522 returned it on 2026-11-22: a real Aten orbit.
+ZOOZVE_ORBITAL_DATA: dict[str, Any] = {
+    "orbit_id": "111",
+    "orbit_determination_date": "2026-11-18 04:49:39",
+    "epoch_osculation": "2461200.5",
+    "eccentricity": ".4101013489730946",
+    "semi_major_axis": ".72356318914361",
+    "inclination": "9.037338276017495",
+    "ascending_node_longitude": "231.4572421200886",
+    "perihelion_argument": "355.3998989862241",
+    "mean_anomaly": "288.8364601767468",
+    "mean_motion": "1.601361479792905",
+    "minimum_orbit_intersection": ".025508",
+    "perihelion_distance": ".4268289492085411",
+    "aphelion_distance": "1.020297429078679",
+    "equinox": "J2000",
+    "orbit_class": {
+        "orbit_class_type": "ATE",
+        "orbit_class_description": "Near-Earth asteroid orbits similar to that of 2062 Aten",
+    },
+}
+
+
+def make_neo_detail(ref: str = "2524522", *, without_orbit: bool = False, **orbital_overrides: Any) -> dict[str, Any]:
+    """A /neo/{id} response with Zoozve's orbit; keyword arguments override orbital_data fields."""
+    detail: dict[str, Any] = {
+        "id": ref,
+        "neo_reference_id": ref,
+        "name": "524522 Zoozve (2002 VE68)",
+        "is_potentially_hazardous_asteroid": True,
+        "close_approach_data": [],
+    }
+    if not without_orbit:
+        detail["orbital_data"] = {**copy.deepcopy(ZOOZVE_ORBITAL_DATA), **orbital_overrides}
+    return detail

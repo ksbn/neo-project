@@ -186,6 +186,29 @@ erDiagram
         timestamptz created_at
         timestamptz updated_at
     }
+    ASTEROIDS ||--o{ ANOMALY_ALERTS : "raised for"
+    ANOMALY_ALERTS {
+        text neo_reference_id PK, FK
+        date close_approach_date PK
+        text rule PK
+        smallint severity "1 info .. 4 critical"
+        text message
+        float value
+        float threshold
+        timestamptz raised_at "first raised"
+    }
+    ORBITAL_ELEMENTS {
+        text neo_reference_id PK "any NEO, no FK"
+        float semi_major_axis_au
+        float eccentricity
+        float inclination_deg
+        float ascending_node_deg
+        float perihelion_argument_deg
+        float mean_anomaly_deg
+        float epoch_jd
+        text orbit_class
+        timestamptz fetched_at "cache age"
+    }
     INGESTION_RUNS {
         bigint id PK
         timestamptz started_at
@@ -209,3 +232,5 @@ How one window is written (all in one transaction, `AsteroidRepository.save`):
 The `close_approaches` migration seeded the table from the approaches already in `asteroids`, so history starts with what was stored before it existed.
 
 `ingestion_runs` gets one row per run that started fetching, written by `application.ingest_feed.IngestionRunRecorder` over its own autocommit connection, so a failed or partial run is recorded even after its data transaction rolled back. Runs that stop earlier (missing settings, database down) can't be recorded; the dashboard flags data older than 36 hours instead. Dry runs record nothing.
+
+`anomaly_alerts` is derived data: each pipeline window replaces the alerts of the passes it fetched (`application.ingest_feed.AlertRecorder`), keeping `raised_at` for alerts that still fire. `orbital_elements` is a cache for the 3D views, filled on demand by `application.enrich_orbit.OrbitEnricher`; it has no foreign key so that asteroids seen only through the live NASA fallback can be cached too.

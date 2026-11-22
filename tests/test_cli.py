@@ -16,11 +16,11 @@ from planetary_defense.application.ingest_feed import DryRunStore
 from planetary_defense.cli import CLI_OUTCOMES, ExitCode, main, outcome, parse_args
 from planetary_defense.config import Settings
 from planetary_defense.domain.errors import NeoError, StorageError
-from planetary_defense.domain.models import RunStatus
+from planetary_defense.domain.models import RunStatus, Severity
 from planetary_defense.infrastructure.nasa_client import BASE_URL, NeoWsClient
-from planetary_defense.infrastructure.repository import AsteroidRepository, IngestionRunRepository
+from planetary_defense.infrastructure.repository import AlertRepository, AsteroidRepository, IngestionRunRepository
 
-from fakes import RunLogSpy
+from fakes import AlertStoreSpy, RunLogSpy
 from support import INVALID_KEY, make_feed, make_neo
 
 FEED = f"{BASE_URL}/feed"
@@ -41,6 +41,7 @@ def run(argv, *, env=ENV, open_feed=fast_feed, open_store=no_store, run_log: Run
     return main(
         argv, settings=Settings(env), open_feed=open_feed, open_store=open_store,
         open_run_log=lambda settings: nullcontext(log),
+        open_alert_store=lambda settings: nullcontext(AlertStoreSpy()),
     )
 
 
@@ -263,8 +264,44 @@ def test_runs_reach_the_ingestion_runs_table(conn, test_db):
     """End to end with the real repository on the test connection."""
     responses.get(FEED, status=403, json={"error": {"message": "An invalid api_key was supplied."}})
     code = main(["--start", "2026-11-01"], settings=Settings(ENV), open_feed=fast_feed, open_store=test_db,
-                open_run_log=lambda settings: nullcontext(IngestionRunRepository(conn)))
+                open_run_log=lambda settings: nullcontext(IngestionRunRepository(conn)),
+                open_alert_store=lambda settings: nullcontext(AlertRepository(conn)))
 
     assert code == ExitCode.CONFIG_ERROR
     last = IngestionRunRepository(conn).pipeline_status().last_run
     assert last is not None and (last.status, last.error_category) == (RunStatus.FAILED, "UpstreamAuthError")
+
+
+# --------------------------------------------------------------------------- #
+# Alerts
+# --------------------------------------------------------------------------- #
+
+
+@responses.activate
+def test_alerts_are_scored_with_the_configured_thresholds(test_db):
+    responses.get(FEED, json=week_feed(date(2026, 11, 1), "a"))  # every test NEO passes at 11.9 LD
+    spy = AlertStoreSpy()
+    env = {**ENV, "ALERT_WATCH_LD": "12"}
+
+    code = main(["--start", "2026-11-01", "--end", "2026-11-07"], settings=Settings(env), open_feed=fast_feed,
+                open_store=test_db, open_run_log=lambda s: nullcontext(RunLogSpy()),
+                open_alert_store=lambda s: nullcontext(spy))
+
+    assert code == ExitCode.OK
+    (passes, alerts), = spy.calls
+    assert len(passes) == 7 and {(a.rule, a.severity) for a in alerts} == {("close_approach", Severity.WATCH)}
+
+
+@responses.activate
+def test_dry_run_scores_no_alerts():
+    responses.get(FEED, json=make_feed({"2026-11-01": [make_neo("1", "2026-11-01")]}))
+
+    def must_not_open(settings):
+        raise AssertionError("a dry run must not open the alert store")
+
+    assert main(["--start", "2026-11-01", "--dry-run"], settings=Settings(ENV), open_feed=fast_feed,
+                open_store=no_store, open_alert_store=must_not_open) == ExitCode.OK
+
+
+def test_bad_thresholds_stop_the_run_before_fetching():
+    assert run(["--start", "2026-11-01", "--dry-run"], env={**ENV, "ALERT_CRITICAL_LD": "99"}) == ExitCode.CONFIG_ERROR

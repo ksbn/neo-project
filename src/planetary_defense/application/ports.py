@@ -13,11 +13,14 @@ from datetime import date
 from typing import Protocol
 
 from planetary_defense.domain.models import (
+    AnomalyAlert,
     ApproachSummary,
     AsteroidSummary,
+    CachedOrbit,
     FeedBatch,
     IngestionRun,
     Observation,
+    OrbitData,
     Overview,
     PipelineStatus,
     UpsertResult,
@@ -63,3 +66,25 @@ class RunReader(Protocol):
     """Answers "when did the pipeline last run, and did it work?" (read side)."""
 
     def pipeline_status(self) -> PipelineStatus: ...
+
+
+class AlertStore(Protocol):
+    """Keeps the anomaly alerts raised for each close approach (write side)."""
+
+    def replace_alerts(self, passes: Sequence[tuple[str, date]], alerts: Sequence[AnomalyAlert]) -> None:
+        """Make ``alerts`` the complete set for ``passes`` ((neo_reference_id, close_approach_date) pairs)."""
+        ...
+
+
+class OrbitSource(Protocol):
+    """Where orbits come from (NASA /neo/{id}). Raises OrbitUnavailable or an UpstreamError."""
+
+    def fetch_orbit(self, neo_reference_id: str) -> OrbitData: ...
+
+
+class OrbitCache(Protocol):
+    """Local copies of orbits, so the UI never waits on NASA for an asteroid it has seen."""
+
+    def get_orbit(self, neo_reference_id: str) -> CachedOrbit | None: ...
+
+    def put_orbit(self, orbit: CachedOrbit) -> None: ...

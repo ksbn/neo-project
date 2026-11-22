@@ -349,3 +349,38 @@ class Trajectory3D:
     closest_point_ld: Vec3  # exact closest point, at NASA's miss distance
     miss_distance_ld: float
     model_miss_ld: float
+
+
+@dataclass(frozen=True)
+class OrbitData:
+    """An asteroid's orbit as NASA determined it (``/neo/{id}`` ``orbital_data``)."""
+
+    neo_reference_id: str
+    elements: OrbitalElements
+    orbit_id: str | None = None  # JPL solution number; changes when NASA refines the orbit
+    orbit_class: str | None = None  # e.g. APO, ATE, AMO
+    moid_au: float | None = None  # minimum orbit intersection distance with Earth
+
+
+@dataclass(frozen=True)
+class CachedOrbit:
+    """An orbit in the local cache, with when it was fetched from NASA."""
+
+    orbit: OrbitData
+    fetched_at: datetime
+
+
+class OrbitOrigin(StrEnum):
+    CACHE = "cache"  # fresh enough local copy
+    NASA = "nasa"  # fetched just now
+    STALE_CACHE = "stale_cache"  # old local copy, because NASA could not be reached
+
+
+@dataclass(frozen=True)
+class OrbitLookup:
+    """The orbit to draw, where it came from, and anything the viewer should know about it."""
+
+    orbit: OrbitData
+    fetched_at: datetime
+    origin: OrbitOrigin
+    note: str | None = None
