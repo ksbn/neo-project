@@ -116,6 +116,50 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
+  /objects/{neo_reference_id}/trajectory:
+    get:
+      tags: [Objects]
+      operationId: getObjectTrajectory
+      summary: 3D geometry of one object's pass and orbit
+      description: |
+        What the 3D Space Viewport draws (added by ADR 0003): the Earth-centred path of a pass in
+        lunar distances, and the Sun-centred orbits of the object and Earth in AU, in the J2000
+        ecliptic frame. The closest point is placed at NASA's miss distance; `model_miss_ld` is what
+        the two-body orbit model alone gives.
+
+        The orbit comes from the local cache; on a miss it is fetched once from NASA's `/neo/{id}`
+        and cached. Without an orbit the Earth view is an approximate straight-line pass at NASA's
+        miss distance and speed (`approximate: true`) and `sun` is `null`.
+      parameters:
+        - $ref: '#/components/parameters/NeoReferenceId'
+        - name: pass
+          in: query
+          required: false
+          description: Which pass to draw. `next` is NASA/JPL's next predicted Earth pass and needs a cached orbit.
+          schema:
+            type: string
+            enum: [latest, next]
+            default: latest
+      responses:
+        '200':
+          description: The geometry. `earth` and `sun` are `null` when there is nothing to draw for them.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Trajectory'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
   /watchlist:
     get:
       tags: [Watchlist]
@@ -844,6 +888,117 @@ components:
           maxItems: 14
           items:
             $ref: '#/components/schemas/DailyCount'
+    Vec3:
+      type: array
+      description: A position [x, y, z] in the J2000 ecliptic frame.
+      minItems: 3
+      maxItems: 3
+      items:
+        type: number
+    EarthView:
+      type: object
+      description: The pass around Earth, in lunar distances (Earth at the origin).
+      required: [units, path, closest, closest_index, miss_ld, model_miss_ld, approach_date, window_days, earth_radius_ld]
+      properties:
+        units:
+          type: string
+          const: LD
+        path:
+          type: array
+          minItems: 2
+          items:
+            $ref: '#/components/schemas/Vec3'
+        closest:
+          $ref: '#/components/schemas/Vec3'
+        closest_index:
+          type: integer
+          minimum: 0
+        miss_ld:
+          type: number
+          minimum: 0
+          description: NASA's miss distance.
+        model_miss_ld:
+          type: number
+          minimum: 0
+          description: The miss distance the orbit model alone predicts.
+        approach_date:
+          type: string
+          format: date
+          description: |
+            NASA's date of closest approach. The drawn path comes from a two-body orbit model, which
+            drifts for passes years away (for Zoozve's 2034 pass by about two days and 0.5 LD);
+            `model_miss_ld` shows the model's own distance.
+        window_days:
+          type: integer
+          minimum: 0
+          description: Days drawn on either side of the closest approach.
+        earth_radius_ld:
+          type: number
+          exclusiveMinimum: 0
+    SunView:
+      type: object
+      description: Both orbits around the Sun and the bodies' positions on the pass date, in AU.
+      required: [units, asteroid_path, earth_path, asteroid, earth, date, orbit_class]
+      properties:
+        units:
+          type: string
+          const: AU
+        asteroid_path:
+          type: array
+          items:
+            $ref: '#/components/schemas/Vec3'
+        earth_path:
+          type: array
+          items:
+            $ref: '#/components/schemas/Vec3'
+        asteroid:
+          $ref: '#/components/schemas/Vec3'
+        earth:
+          $ref: '#/components/schemas/Vec3'
+        date:
+          type: string
+          format: date
+        orbit_class:
+          type: [string, 'null']
+    Trajectory:
+      type: object
+      required: [version, neo_reference_id, name, hazardous, pass, approximate, orbit_origin, provenance, default_mode, earth, sun]
+      properties:
+        version:
+          type: integer
+          const: 1
+          description: Version of this geometry document.
+        neo_reference_id:
+          $ref: '#/components/schemas/NeoReferenceId'
+        name:
+          type: string
+        hazardous:
+          type: boolean
+        pass:
+          type: string
+          enum: [latest, next]
+        approximate:
+          type: boolean
+          description: '`true` when the Earth view is a straight-line pass, not computed from an orbit.'
+        orbit_origin:
+          type: [string, 'null']
+          enum: [cache, nasa, stale_cache, null]
+          description: Where the orbit came from; `null` when there is no orbit.
+        provenance:
+          type: string
+          description: Human-readable source of the geometry, for the viewer's legend.
+        default_mode:
+          type: [string, 'null']
+          enum: [earth, sun, null]
+          description: The view to open first; `null` when there is nothing to draw.
+        earth:
+          oneOf:
+            - $ref: '#/components/schemas/EarthView'
+            - type: 'null'
+        sun:
+          oneOf:
+            - $ref: '#/components/schemas/SunView'
+            - type: 'null'
     ErrorDetail:
       type: object
       required: [field, reason]

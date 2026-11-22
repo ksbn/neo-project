@@ -260,6 +260,61 @@ class SummaryOut(_Out):
         )
 
 
+# --------------------------------------------------------------------------- #
+# Trajectory (ADR 0003)
+# --------------------------------------------------------------------------- #
+
+Vec3 = Annotated[list[float], Field(min_length=3, max_length=3)]
+
+
+class EarthViewOut(_Out):
+    units: Literal["LD"]
+    path: list[Vec3]
+    closest: Vec3
+    closest_index: int
+    miss_ld: float
+    model_miss_ld: float
+    approach_date: date
+    window_days: int
+    earth_radius_ld: float
+
+
+class SunViewOut(_Out):
+    units: Literal["AU"]
+    asteroid_path: list[Vec3]
+    earth_path: list[Vec3]
+    asteroid: Vec3
+    earth: Vec3
+    date: date
+    orbit_class: str | None
+
+
+class TrajectoryOut(_Out):
+    version: Literal[1]
+    neo_reference_id: str
+    name: str
+    hazardous: bool
+    # "pass" is a Python keyword: the field is pass_ in code and "pass" on the wire.
+    pass_: Literal["latest", "next"] = Field(alias="pass")
+    approximate: bool
+    orbit_origin: Literal["cache", "nasa", "stale_cache"] | None
+    provenance: str
+    default_mode: Literal["earth", "sun"] | None
+    earth: EarthViewOut | None
+    sun: SunViewOut | None
+
+    @classmethod
+    def of(cls, neo_reference_id: str, name: str, hazardous: bool, which: str, payload: dict | None,
+           orbit_origin: str | None, provenance: str) -> TrajectoryOut:
+        p = payload or {}
+        return cls.model_validate({
+            "version": 1, "neo_reference_id": neo_reference_id, "name": name, "hazardous": hazardous,
+            "pass": which, "approximate": bool(p.get("approximate", False)), "orbit_origin": orbit_origin,
+            "provenance": provenance, "default_mode": p.get("default_mode"),
+            "earth": p.get("earth"), "sun": p.get("sun"),
+        })
+
+
 ErrorCode = Literal["BAD_REQUEST", "NOT_FOUND", "ALREADY_WATCHED", "VALIDATION_FAILED", "UNKNOWN_OBJECT",
                     "IDEMPOTENCY_KEY_REUSED", "RATE_LIMITED", "INTERNAL_ERROR", "STORAGE_UNAVAILABLE"]
 

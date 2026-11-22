@@ -22,6 +22,28 @@
   <main>
     <section id="kpis" class="kpis" aria-label="Key figures"></section>
 
+    <section class="stage" aria-label="Tracked object">
+      <div class="panel viewport-panel">
+        <div class="panel-head">
+          <h2>3D Space Viewport</h2>
+          <div class="vp-controls">
+            <div id="vp-pass" class="segmented small" role="radiogroup" aria-label="Which pass to draw">
+              <label><input type="radio" name="vp-pass" value="latest" checked>Latest pass</label>
+              <label><input type="radio" name="vp-pass" value="next">Next predicted</label>
+            </div>
+            <button id="vp-inspect" class="btn small" type="button" title="Open the detail drawer">Inspect</button>
+          </div>
+        </div>
+        <iframe id="vp-frame" class="vp-frame" title="3D Space Viewport"></iframe>
+        <p class="muted vp-hint">Click a row, a dot or a watchlist entry to track it · <kbd>v</kbd> tracks the selected row · drag to rotate, scroll to zoom</p>
+      </div>
+      <div class="panel telemetry-panel">
+        <div class="panel-head"><h2>Orbital Telemetry</h2></div>
+        <div id="vp-title" class="vp-title"></div>
+        <div id="telemetry"></div>
+      </div>
+    </section>
+
     <div class="layout">
       <section class="panel" aria-labelledby="objects-title">
         <div class="panel-head">
@@ -83,6 +105,7 @@
             <li><kbd>/</kbd> search</li><li><kbd>j</kbd><kbd>k</kbd> move</li>
             <li><kbd>Enter</kbd> inspect</li><li><kbd>w</kbd> watch</li>
             <li><kbd>x</kbd> compare</li><li><kbd>[</kbd><kbd>]</kbd> page</li>
+            <li><kbd>v</kbd> view in 3D</li><li><kbd>?</kbd> help</li>
             <li><kbd>1</kbd>–<kbd>6</kbd> presets</li><li><kbd>Esc</kbd> close</li>
           </ul>
         </section>
@@ -100,6 +123,7 @@
       <tr><td><kbd>/</kbd></td><td>Focus the search</td></tr>
       <tr><td><kbd>j</kbd> / <kbd>k</kbd></td><td>Next / previous row</td></tr>
       <tr><td><kbd>Enter</kbd></td><td>Inspect the selected object</td></tr>
+      <tr><td><kbd>v</kbd></td><td>Show the selected object in the 3D viewport</td></tr>
       <tr><td><kbd>w</kbd></td><td>Add the selected object to the watchlist</td></tr>
       <tr><td><kbd>x</kbd></td><td>Add to / remove from the comparison (up to 3)</td></tr>
       <tr><td><kbd>[</kbd> / <kbd>]</kbd></td><td>Previous / next page</td></tr>

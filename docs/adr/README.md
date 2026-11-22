@@ -7,3 +7,4 @@ The contract is changed and linted (`npx @redocly/cli lint openapi.yaml`) before
 |---|---|---|
 | [0001](0001-summary-endpoint-for-dashboard-kpis.md) | Summary endpoint for dashboard KPIs | Accepted |
 | [0002](0002-watchlist-listing-and-watched-flag.md) | Watchlist listing and a `watched` flag on objects | Accepted |
+| [0003](0003-trajectory-endpoint-for-the-3d-viewport.md) | Trajectory endpoint for the 3D Space Viewport | Accepted |

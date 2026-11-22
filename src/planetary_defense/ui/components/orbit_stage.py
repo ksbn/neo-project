@@ -16,10 +16,10 @@ import pandas as pd
 import streamlit as st
 
 from planetary_defense.application.dashboard_service import DashboardData
-from planetary_defense.application.enrich_orbit import earth_view_from, sun_view_from
+from planetary_defense.application.enrich_orbit import earth_view_from
+from planetary_defense.application.viewport import pass_payload
 from planetary_defense.domain.errors import NeoError
 from planetary_defense.domain.models import ApproachSummary, AsteroidSummary, AsteroidView, OrbitLookup, OrbitOrigin
-from planetary_defense.domain.orbital_math import straight_line_flyby
 from planetary_defense.domain.units import au_to_ld, km_to_ld
 from planetary_defense.ui.components import orbital_3d
 from planetary_defense.ui.messages import describe, orbit_status
@@ -65,24 +65,14 @@ def viewport_payload(
     today: date,
     context: list[tuple[str, bool, Any]] | None = None,
 ) -> dict[str, Any] | None:
-    """What the viewport draws, or None when there is nothing to draw.
-
-    With an orbit: the Earth view of the latest pass (if any) and the Sun view on that date.
-    Without one: an approximate straight-line pass from NASA's miss distance and speed.
-    """
-    pass_date = row.close_approach_date if row is not None else None
-    miss_km = row.miss_distance_km if row is not None else None
-    hazardous = row is not None and row.is_potentially_hazardous
-    if lookup is not None:
-        on = pass_date if pass_date is not None and miss_km else today
-        trajectory = earth_view_from(lookup, on, km_to_ld(miss_km)).trajectory if pass_date and miss_km else None
-        return orbital_3d.build_payload(name=name, hazardous=hazardous, provenance=provenance,
-                                        trajectory=trajectory, sun=sun_view_from(lookup, on), context=context)
-    if pass_date is not None and miss_km and row is not None and row.relative_velocity_km_s is not None:
-        trajectory = straight_line_flyby(pass_date, km_to_ld(miss_km), row.relative_velocity_km_s)
-        return orbital_3d.build_payload(name=name, hazardous=hazardous, provenance=provenance,
-                                        trajectory=trajectory, sun=None, approximate=True, context=context)
-    return None
+    """What the viewport draws for a table row (see :func:`application.viewport.pass_payload`)."""
+    approach = None
+    if row is not None and row.close_approach_date is not None and row.miss_distance_km:
+        if lookup is not None or row.relative_velocity_km_s is not None:
+            approach = ApproachSummary(row.close_approach_date, "Earth", row.relative_velocity_km_s or 0.0,
+                                       row.miss_distance_km)
+    return pass_payload(lookup, name=name, hazardous=row is not None and row.is_potentially_hazardous,
+                        approach=approach, provenance=provenance, today=today, context=context)
 
 
 def _row(key: str, value: str) -> str:

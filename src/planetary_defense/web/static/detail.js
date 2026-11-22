@@ -33,8 +33,8 @@ function orbitSketch(o) {
 }
 
 export class DetailDrawer {
-  constructor(drawer, scrim, { onWatch, onClose }) {
-    Object.assign(this, { drawer, scrim, onWatch, onClose });
+  constructor(drawer, scrim, { onWatch, onView, onClose }) {
+    Object.assign(this, { drawer, scrim, onWatch, onView, onClose });
     this.controller = null;
     this.currentId = null;
     scrim.addEventListener("click", () => this.close());
@@ -111,7 +111,8 @@ export class DetailDrawer {
       el("h2", { class: "name" }, d.name),
       el("div", {}, badge(d.alert_level), d.is_potentially_hazardous ? el("span", { class: "pha-tag" }, "POTENTIALLY HAZARDOUS") : null,
         d.is_sentry_object ? el("span", { class: "pha-tag" }, "SENTRY") : null),
-      el("section", {}, watch),
+      el("section", { class: "actions" }, watch,
+        el("button", { class: ["btn"], type: "button", onclick: () => this.onView(d.neo_reference_id) }, "◎ View in 3D  (v)")),
       el("section", {}, el("h3", {}, "Latest recorded pass"), kv(approachRows(d.latest_approach))),
       el("section", {}, el("h3", {}, "Next predicted Earth pass (NASA/JPL)"),
         d.next_predicted_approach ? kv(approachRows(d.next_predicted_approach))

@@ -14,10 +14,10 @@ import logging
 import re
 import uuid
 from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager
-from datetime import date
+from contextlib import AbstractContextManager, nullcontext
+from datetime import date, timedelta
 from pathlib import Path
-from typing import Annotated, Any, Final
+from typing import Annotated, Any, Final, Literal
 
 import psycopg
 from fastapi import Depends, FastAPI, Header, Query, Request
@@ -38,16 +38,20 @@ from planetary_defense.api.schemas import (
     Pagination,
     SeverityName,
     SummaryOut,
+    TrajectoryOut,
     WatchlistEntryCreate,
     WatchlistEntryOut,
     WatchlistPageOut,
 )
 from planetary_defense.application.catalog_service import CatalogService
+from planetary_defense.application.enrich_orbit import DEFAULT_MAX_AGE
+from planetary_defense.application.ports import OrbitSource
 from planetary_defense.domain.catalog import ObjectQuery, Priority, SortKey, WatchRequest
 from planetary_defense.domain.errors import NeoError
 from planetary_defense.domain.models import Severity
 from planetary_defense.infrastructure.catalog_repository import ObjectRepository, WatchlistRepository
 from planetary_defense.infrastructure.repository import AsteroidRepository, OrbitRepository
+from planetary_defense.ui.components.orbital_3d.bridge import INDEX_HTML, SCENE_JS, TEXTURE_BASE, THREE_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +62,8 @@ STATIC: Final = Path(__file__).resolve().parent.parent / "web" / "static"
 _REQUEST_ID: Final = re.compile(r"^[A-Za-z0-9_.-]{8,64}$")
 
 ConnectionFactory = Callable[[], AbstractContextManager[psycopg.Connection]]
+OrbitSourceFactory = Callable[[], AbstractContextManager[OrbitSource]]
+
 
 
 def create_app(
@@ -66,7 +72,10 @@ def create_app(
     read_limiter: RateLimiter | None = None,
     write_limiter: RateLimiter | None = None,
     today: Callable[[], date] = date.today,
+    open_orbit_source: OrbitSourceFactory | None = None,
+    orbit_max_age: timedelta = DEFAULT_MAX_AGE,
 ) -> FastAPI:
+    """``open_orbit_source``: where trajectories fetch an orbit missing from the cache (NASA); None = cache only."""
     reads = read_limiter or RateLimiter(capacity=240, per_second=4)
     writes = write_limiter or RateLimiter(capacity=20, per_second=0.2)
     app = FastAPI(title="ASTRAEA Planetary Defense API", openapi_url=None, docs_url=None, redoc_url=None)
@@ -110,6 +119,12 @@ def create_app(
         with open_connection() as conn:
             yield CatalogService(ObjectRepository(conn), AsteroidRepository(conn), OrbitRepository(conn),
                                  WatchlistRepository(conn))
+
+    def trajectory_service() -> Iterator[CatalogService]:
+        """Like service(), plus NASA for orbits missing from the cache."""
+        with open_connection() as conn, (open_orbit_source() if open_orbit_source else nullcontext(None)) as source:
+            yield CatalogService(ObjectRepository(conn), AsteroidRepository(conn), OrbitRepository(conn),
+                                 WatchlistRepository(conn), orbit_source=source, orbit_max_age=orbit_max_age)
 
     def client_of(request: Request) -> str:
         return request.client.host if request.client else "unknown"
@@ -162,6 +177,18 @@ def create_app(
         detail = svc.get_object(neo_reference_id)
         return JSONResponse(ObjectDetailOut.of_detail(detail, today()).model_dump(mode="json"))
 
+    @app.get(PREFIX + "/objects/{neo_reference_id}/trajectory", dependencies=[Depends(limit_reads)])
+    def get_object_trajectory(
+        svc: Annotated[CatalogService, Depends(trajectory_service)],
+        neo_reference_id: Annotated[NeoId, PathParam()],
+        which: Annotated[Literal["latest", "next"], Query(alias="pass")] = "latest",
+    ) -> JSONResponse:
+        result = svc.trajectory(neo_reference_id, which, today())
+        found = svc.get_object(neo_reference_id).row  # name and hazard flag, as listed
+        body = TrajectoryOut.of(neo_reference_id, found.name, found.is_potentially_hazardous, which, result.payload,
+                                result.orbit_origin.value if result.orbit_origin else None, result.provenance)
+        return JSONResponse(body.model_dump(mode="json", by_alias=True))
+
     @app.get(f"{PREFIX}/watchlist", dependencies=[Depends(limit_reads)])
     def list_watchlist_entries(
         svc: Annotated[CatalogService, Depends(service)],
@@ -213,6 +240,18 @@ def create_app(
             "</body></html>"
         )
 
+    @app.get("/viewport.html", include_in_schema=False)
+    def viewport_page() -> HTMLResponse:
+        """The 3D scene page; web/static/viewport-boot.js loads its geometry from GET /objects/{id}/trajectory."""
+        page = INDEX_HTML.read_text("utf-8").replace("__THREE_VERSION__", THREE_VERSION)
+        page = page.replace("__SCENE_JS__", 'import "./viewport-boot.js";').replace("__PAYLOAD__", "null")
+        return HTMLResponse(page)
+
+    @app.get("/viewport-scene.js", include_in_schema=False)
+    def viewport_scene() -> Response:
+        return Response(SCENE_JS.read_text("utf-8").replace("__TEXTURE_BASE__", TEXTURE_BASE),
+                        media_type="text/javascript")
+
     if STATIC.is_dir():
         app.mount("/", StaticFiles(directory=STATIC, html=True), name="dashboard")
     return app
@@ -226,7 +265,10 @@ def main() -> None:  # pragma: no cover - starts a server
     import uvicorn
 
     from planetary_defense.config import Settings
+    from planetary_defense.domain.errors import ConfigError, UpstreamError
     from planetary_defense.infrastructure.db import connect
+    from planetary_defense.infrastructure.error_boundary import CircuitBreaker, GuardedOrbitSource
+    from planetary_defense.infrastructure.nasa_client import INTERACTIVE, NeoWsClient
 
     parser = argparse.ArgumentParser(description="Serve the ASTRAEA REST API and dashboard.")
     parser.add_argument("--host", default="127.0.0.1")
@@ -240,4 +282,20 @@ def main() -> None:  # pragma: no cover - starts a server
             yield conn
 
     logging.basicConfig(level="INFO", format="%(asctime)s %(levelname)-8s %(name)s: %(message)s")
-    uvicorn.run(create_app(open_connection), host=args.host, port=args.port)
+    open_orbit_source: OrbitSourceFactory | None = None
+    try:
+        key = settings.nasa_api_key()
+    except ConfigError as exc:
+        logging.getLogger(__name__).warning("3D trajectories use cached orbits only: %s", exc)
+    else:
+        breaker = CircuitBreaker(120, trips_on=(UpstreamError,))  # one outage skips NASA for everyone, briefly
+
+        @contextmanager
+        def nasa_orbit_source() -> Iterator[OrbitSource]:
+            with NeoWsClient(key, profile=INTERACTIVE, user_agent="neo-api/1.0") as client:
+                yield GuardedOrbitSource(client, breaker)
+
+        open_orbit_source = nasa_orbit_source
+
+    uvicorn.run(create_app(open_connection, open_orbit_source=open_orbit_source,
+                           orbit_max_age=settings.orbit_cache_max_age()), host=args.host, port=args.port)

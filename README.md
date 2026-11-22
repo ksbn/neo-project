@@ -138,6 +138,7 @@ Later contract changes are recorded as ADRs in [`docs/adr/`](docs/adr/).
 | `POST /api/v1/watchlist` | Watch an object: validated body, `201` / `400` / `409` / `422`, optional `Idempotency-Key` |
 | `GET /api/v1/watchlist` | The watchlist, newest first ([ADR 0002](docs/adr/0002-watchlist-listing-and-watched-flag.md)) |
 | `GET /api/v1/summary` | KPI aggregates ([ADR 0001](docs/adr/0001-summary-endpoint-for-dashboard-kpis.md)) |
+| `GET /api/v1/objects/{id}/trajectory` | 3D geometry of the latest (`pass=latest`) or next predicted (`pass=next`) Earth pass and both orbits; cache-first, NASA on a miss, straight-line fallback ([ADR 0003](docs/adr/0003-trajectory-endpoint-for-the-3d-viewport.md)) |
 
 Every error has the same `ErrorResponse` body (`code`, `message`, `details[{field, reason}]`, `request_id`,
 `timestamp`) and `X-Request-ID` header: `400` unreadable request, `404`, `409` already watched, `422` body
@@ -155,7 +156,7 @@ API accepts exactly the bodies and query values the contract's JSON Schema accep
 
 **The dashboard** (`src/planetary_defense/web/static/`, plain ES modules, no build step) reads only through
 the API, which a test enforces. It has KPI cards from `/summary` (click a severity, a day or a figure to filter);
-live debounced search; presets and sliders, all kept in the URL; an approach map synchronised with the table
+a **3D Space Viewport** (the Control Room's three.js scene, fed by `/trajectory`) with an Orbital Telemetry card that follows the selected row, dot or watchlist entry (`v`), and a Latest / Next predicted pass toggle; live debounced search; presets and sliders, all kept in the URL; an approach map synchronised with the table
 (hover highlights both, drag across dates to filter); a detail drawer that shows unknown values as
 "N/A (untracked)"; a watchlist form that shows the API's field errors and retries with the same idempotency
 key ("Test: send twice" demonstrates the replay); a compare tray; empty and error states with Retry; and
