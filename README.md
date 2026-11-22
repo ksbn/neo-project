@@ -100,7 +100,14 @@ venv/bin/streamlit run app.py   # or `streamlit run app.py` with venv activated
 
 Use the same `venv` as the pipeline (`scripts/run_pipeline.sh` runs `venv/bin/python`), so the dashboard and the pipeline always run the same library versions.
 
-It shows totals over the whole `asteroids` table (computed in SQL) and lists the newest 5,000 rows. If the database is unavailable or empty it falls back to the live NASA API (last 3 days, one quick retry, so the page never waits minutes on a rate limit).
+It shows:
+
+* **Pipeline status:** when the last run finished and what it saved, a warning if the data is older than 36 hours, or why the last run failed.
+* **Totals** over the whole database (computed in SQL), including the number of close approaches recorded.
+* **The newest 5,000 asteroids**, searchable and filterable.
+* **Close approach history** of any asteroid in the filtered table: every pass the pipeline has recorded.
+
+If the database is unavailable or empty it falls back to the live NASA API (last 3 days, one quick retry, so the page never waits minutes on a rate limit). Pipeline status and history come from the database only.
 
 Failures are not cached, so the page recovers as soon as a source is back, but a source that just failed is skipped for a cooldown (database 30 s, NASA 120 s) so that clicking around a degraded page stays instant. **Refresh data** clears the caches and the cooldowns. The Diagnostics panel in the sidebar says why a source was skipped.
 
@@ -146,6 +153,7 @@ pytest
 * `tests/test_ingest.py`: `IngestService` and its observers with in-memory fakes.
 * `tests/test_dashboard_data.py`: the dashboard's views and fallback, without Streamlit.
 * `tests/test_resilience.py`: the circuit breaker and the dashboard's error wording.
+* `tests/test_ui_messages.py`: the dashboard's pipeline-status wording.
 * `tests/test_ports.py`: protocol conformance (checked by pyright).
 * `tests/test_pipeline.py`: argument parsing and exit codes end to end.
 
@@ -162,6 +170,14 @@ docker compose run --rm migrate status            # what's applied / pending
 docker compose run --rm migrate new add_something # creates db/migrations/<timestamp>_add_something.sql
 docker compose run --rm migrate up                # apply pending migrations
 ```
+
+| Migration | Creates |
+|---|---|
+| `20261118000000_create_asteroids` | `asteroids`: current state, one row per asteroid with its newest close approach |
+| `20261122120000_create_close_approaches` | `close_approaches`: every recorded pass (history), seeded from `asteroids` |
+| `20261122120100_create_ingestion_runs` | `ingestion_runs`: one row per pipeline run, shown on the dashboard |
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#5-how-the-data-is-stored) for how they are written.
 
 Each file has a `-- migrate:up` section and a `-- migrate:down` section. Rules:
 

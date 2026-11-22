@@ -1,12 +1,21 @@
 """Dashboard query service (dashboard_data.py): no Streamlit, pandas, HTTP or database."""
 
-from datetime import date
+from datetime import UTC, date, datetime
 
 import pytest
 
 from conftest import make_feed, make_neo
 from dashboard_data import FallbackReader, Source, view_from_feed, view_from_store
-from domain import AsteroidSummary, AsteroidView, FeedBatch, Overview
+from domain import (
+    ApproachSummary,
+    AsteroidSummary,
+    AsteroidView,
+    FeedBatch,
+    IngestionRun,
+    Overview,
+    PipelineStatus,
+    RunStatus,
+)
 from errors import ConfigError, NeoError, StorageError
 from models import parse_feed
 from ui_messages import describe
@@ -84,12 +93,39 @@ class StubReader:
         self.limits.append(limit)
         return view("a").rows
 
+    def approach_history(self, neo_reference_id: str, limit: int) -> list[ApproachSummary]:
+        return []
+
+
+LAST_RUN = IngestionRun(
+    started_at=datetime(2026, 11, 22, 7, 59, tzinfo=UTC), finished_at=datetime(2026, 11, 22, 8, 0, tzinfo=UTC),
+    start_date=date(2026, 11, 20), end_date=date(2026, 11, 22), status=RunStatus.SUCCESS,
+)
+
+
+class StubRuns:
+    def __init__(self, fail: bool = False) -> None:
+        self.fail = fail
+
+    def pipeline_status(self) -> PipelineStatus:
+        if self.fail:
+            raise StorageError("relation ingestion_runs does not exist")
+        return PipelineStatus(last_run=LAST_RUN, last_success_at=LAST_RUN.finished_at)
+
 
 def test_store_view_keeps_whole_table_totals_with_limited_rows():
     reader = StubReader()
-    result = view_from_store(reader, limit=1)
+    result = view_from_store(reader, StubRuns(), limit=1)
     assert reader.limits == [1]
     assert result.overview.total == 10_000 and len(result.rows) == 1
+    assert result.history_available
+    assert result.status == PipelineStatus(last_run=LAST_RUN, last_success_at=LAST_RUN.finished_at)
+
+
+def test_store_view_survives_a_status_failure():
+    """Run status is secondary: losing it must not hide the asteroid data."""
+    result = view_from_store(StubReader(), StubRuns(fail=True))
+    assert result.status is None and result.overview.total == 10_000
 
 
 class StubFeed:
@@ -119,7 +155,8 @@ def test_feed_view_covers_three_days_dedupes_and_sorts_newest_first():
     assert feed.calls == [(date(2026, 11, 8), date(2026, 11, 10))]
     assert [r.neo_reference_id for r in result.rows][:2] in (["twice", "new"], ["new", "twice"])
     assert result.rows[-1].neo_reference_id == "old"
-    assert result.overview == Overview(total=3, hazardous=1, latest_approach=date(2026, 11, 10))
+    assert result.overview == Overview(total=3, hazardous=1, latest_approach=date(2026, 11, 10), approaches=4)
+    assert result.status is None and not result.history_available
 
 
 def test_every_error_class_has_safe_wording():

@@ -15,7 +15,8 @@ import responses
 from client import BASE_URL, NeoWsClient
 from config import Settings
 from conftest import make_feed, make_neo
-from database import AsteroidRepository
+from database import AsteroidRepository, IngestionRunRepository
+from domain import IngestionRun, RunStatus
 from errors import NeoError, StorageError
 from ingest import DryRunStore
 from pipeline import CLI_OUTCOMES, ExitCode, main, outcome, parse_args
@@ -33,8 +34,20 @@ def no_store(settings: Settings):
     raise AssertionError("this test must not open the database")
 
 
-def run(argv, *, env=ENV, open_feed=fast_feed, open_store=no_store) -> int:
-    return main(argv, settings=Settings(env), open_feed=open_feed, open_store=open_store)
+class RunLogSpy:
+    def __init__(self) -> None:
+        self.runs: list[IngestionRun] = []
+
+    def record(self, run: IngestionRun) -> None:
+        self.runs.append(run)
+
+
+def run(argv, *, env=ENV, open_feed=fast_feed, open_store=no_store, run_log: RunLogSpy | None = None) -> int:
+    log = run_log if run_log is not None else RunLogSpy()
+    return main(
+        argv, settings=Settings(env), open_feed=open_feed, open_store=open_store,
+        open_run_log=lambda settings: nullcontext(log),
+    )
 
 
 @pytest.fixture
@@ -205,3 +218,57 @@ def test_every_error_class_maps_to_an_outcome():
         code, label = outcome(kind("x"))
         assert isinstance(code, ExitCode) and label
     assert outcome(BrandNew("x")) == CLI_OUTCOMES[NeoError]
+
+
+# --------------------------------------------------------------------------- #
+# Run recording
+# --------------------------------------------------------------------------- #
+
+
+@responses.activate
+def test_successful_run_is_recorded(test_db):
+    responses.get(FEED, json=week_feed(date(2026, 11, 1), "a"))
+    log = RunLogSpy()
+
+    assert run(["--start", "2026-11-01", "--end", "2026-11-07"], open_store=test_db, run_log=log) == ExitCode.OK
+
+    (recorded,) = log.runs
+    assert (recorded.status, recorded.inserted, recorded.new_approaches, recorded.error_category) == (
+        RunStatus.SUCCESS, 7, 7, None,
+    )
+    assert (recorded.start_date, recorded.end_date) == (date(2026, 11, 1), date(2026, 11, 7))
+    assert recorded.started_at <= recorded.finished_at
+
+
+@responses.activate
+def test_partial_run_is_recorded_with_its_cause(test_db):
+    responses.get(FEED, json=week_feed(date(2026, 11, 1), "a"))
+    responses.get(FEED, status=503)
+    log = RunLogSpy()
+
+    assert run(["--start", "2026-11-01", "--end", "2026-11-10"], open_store=test_db, run_log=log) == ExitCode.PARTIAL
+    (recorded,) = log.runs
+    assert (recorded.status, recorded.windows_done, recorded.error_category) == (RunStatus.PARTIAL, 1, "UpstreamUnavailable")
+
+
+@responses.activate
+def test_dry_run_records_nothing():
+    responses.get(FEED, json=make_feed({"2026-11-01": [make_neo("1", "2026-11-01")]}))
+
+    def must_not_open(settings):
+        raise AssertionError("a dry run must not open the run log")
+
+    assert main(["--start", "2026-11-01", "--dry-run"], settings=Settings(ENV), open_feed=fast_feed,
+                open_store=no_store, open_run_log=must_not_open) == ExitCode.OK
+
+
+@responses.activate
+def test_runs_reach_the_ingestion_runs_table(conn, test_db):
+    """End to end with the real repository on the test connection."""
+    responses.get(FEED, status=403, json={"error": {"message": "An invalid api_key was supplied."}})
+    code = main(["--start", "2026-11-01"], settings=Settings(ENV), open_feed=fast_feed, open_store=test_db,
+                open_run_log=lambda settings: nullcontext(IngestionRunRepository(conn)))
+
+    assert code == ExitCode.CONFIG_ERROR
+    last = IngestionRunRepository(conn).pipeline_status().last_run
+    assert last is not None and (last.status, last.error_category) == (RunStatus.FAILED, "UpstreamAuthError")
