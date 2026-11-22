@@ -10,11 +10,13 @@ from planetary_defense.application.ports import (
     AsteroidReader,
     AsteroidStore,
     FeedSource,
+    ObjectReader,
     OrbitCache,
     OrbitSource,
     RunLog,
     RunReader,
     UpcomingReader,
+    WatchlistStore,
 )
 from planetary_defense.domain.models import FeedBatch
 from planetary_defense.infrastructure.nasa_client import NeoWsClient
@@ -62,3 +64,11 @@ def test_enrichment_ports_conform(conn) -> None:
     alert_stores: list[AlertStore] = [AlertRepository(conn), AlertStoreSpy()]
     upcoming: UpcomingReader = OrbitRepository(conn)
     assert len(sources) == len(caches) == len(alert_stores) == 2 and upcoming is not None
+
+
+def test_catalog_ports_conform(conn) -> None:
+    from planetary_defense.infrastructure.catalog_repository import ObjectRepository, WatchlistRepository
+
+    objects: ObjectReader = ObjectRepository(conn)
+    watchlist: WatchlistStore = WatchlistRepository(conn)
+    assert objects is not None and watchlist is not None

@@ -1,0 +1,887 @@
+openapi: 3.1.0
+info:
+  title: ASTRAEA Planetary Defense API
+  version: 1.0.0
+  summary: Near-Earth objects, their close approaches and alerts, and the operator watchlist.
+  description: |
+    Read access to the near-Earth objects (NEOs) that the ingestion pipeline stores from
+    NASA NeoWs, and a watchlist that operators write to.
+
+    **Units.** Distances in kilometres (`*_km`), lunar distances (`*_ld`, NeoWs convention:
+    1 LD = 1 AU / 389) or astronomical units (`*_au`); velocities in km/s; diameters in metres.
+
+    **Unknown is null, never zero.** A value NASA did not provide, or that the service has not
+    fetched yet (for example the orbit of an object whose orbit is not cached), is `null`.
+    Clients must show it as unknown rather than as `0`.
+
+    **Errors.** Every error response has the same `ErrorResponse` body and carries the
+    `X-Request-ID` header, whose value is also the body's `request_id`.
+
+    **400 vs 422.** `400` means the request could not be read: malformed JSON, a query or
+    path parameter of the wrong type or out of range, or a malformed header. `422` means the
+    request was read but its content is not acceptable: a body field failing its constraints,
+    a reference to an object that does not exist, or an idempotency key reused with a
+    different body.
+
+    **Idempotency.** `POST /watchlist` accepts an optional `Idempotency-Key` header. Retrying
+    with the same key and the same body returns the original `201` response (with
+    `Idempotent-Replayed: true`) instead of creating a second entry; the same key with a
+    different body is rejected with `422` (`IDEMPOTENCY_KEY_REUSED`). Keys are kept for 24 hours.
+  contact:
+    name: ASTRAEA maintainers
+    url: https://github.com/ksbn/neo-project
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: /api/v1
+    description: Same origin as the dashboard (locally http://localhost:8010)
+security: []
+tags:
+  - name: Objects
+    description: Near-earth objects with their latest close approach, orbit and alerts.
+  - name: Watchlist
+    description: Objects an operator has chosen to follow.
+  - name: Summary
+    description: Aggregates for dashboard KPIs.
+paths:
+  /objects:
+    get:
+      tags: [Objects]
+      operationId: listObjects
+      summary: List near-Earth objects
+      description: |
+        The stored objects with their latest close approach and the most severe alert raised
+        for that approach. Filters combine with AND. Results are paginated with `limit` and
+        `offset`; `pagination.total` counts every match, not only this page.
+      parameters:
+        - $ref: '#/components/parameters/Query'
+        - $ref: '#/components/parameters/Hazardous'
+        - $ref: '#/components/parameters/MaxDistanceLd'
+        - $ref: '#/components/parameters/MinVelocityKmS'
+        - $ref: '#/components/parameters/MinSeverity'
+        - $ref: '#/components/parameters/Watched'
+        - $ref: '#/components/parameters/ApproachFrom'
+        - $ref: '#/components/parameters/ApproachTo'
+        - $ref: '#/components/parameters/Sort'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: A page of objects.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ObjectPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /objects/{neo_reference_id}:
+    get:
+      tags: [Objects]
+      operationId: getObject
+      summary: Get one near-Earth object
+      description: |
+        Every stored attribute of one object: its latest and recorded close approaches, its
+        orbit from the local cache (all orbit fields are `null` when the orbit is not cached;
+        this endpoint never calls NASA), its next predicted Earth pass, its alerts, and its
+        watchlist entry.
+      parameters:
+        - $ref: '#/components/parameters/NeoReferenceId'
+      responses:
+        '200':
+          description: The object.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ObjectDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /watchlist:
+    get:
+      tags: [Watchlist]
+      operationId: listWatchlistEntries
+      summary: List the watchlist
+      description: Watched objects, most recently added first. Added by ADR 0002.
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: A page of watchlist entries.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WatchlistPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+    post:
+      tags: [Watchlist]
+      operationId: createWatchlistEntry
+      summary: Add an object to the watchlist
+      description: |
+        Starts watching a stored object. An object can be on the watchlist once: adding it
+        again without a matching idempotency key is a `409` conflict.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WatchlistEntryCreate'
+            examples:
+              zoozve:
+                summary: Watch Zoozve before its next pass
+                value:
+                  neo_reference_id: '2524522'
+                  priority: high
+                  alert_threshold_ld: 20
+                  note: Re-check the orbit before the 2034 pass.
+                  tags: [aten, pha]
+      responses:
+        '201':
+          description: |
+            The entry was created, or (with `Idempotent-Replayed: true`) this is the response
+            to an earlier identical request with the same `Idempotency-Key`.
+          headers:
+            Location:
+              description: URL of the object that is now watched.
+              schema:
+                type: string
+                format: uri-reference
+            Idempotent-Replayed:
+              description: '`true` when the response was replayed for a retried request.'
+              schema:
+                type: string
+                enum: ['true', 'false']
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WatchlistEntry'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /summary:
+    get:
+      tags: [Summary]
+      operationId: getSummary
+      summary: Dashboard KPIs
+      description: |
+        Aggregates over every stored object, so KPI cards never have to page through
+        `/objects`. Added by ADR 0001.
+      responses:
+        '200':
+          description: The current figures.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Summary'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+components:
+  parameters:
+    NeoReferenceId:
+      name: neo_reference_id
+      in: path
+      required: true
+      description: NASA's reference ID of the object.
+      schema:
+        $ref: '#/components/schemas/NeoReferenceId'
+    Query:
+      name: q
+      in: query
+      required: false
+      description: Case-insensitive substring of the object's name.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 100
+    Hazardous:
+      name: hazardous
+      in: query
+      required: false
+      description: Only objects NASA classifies as potentially hazardous (`true`) or not (`false`).
+      schema:
+        type: boolean
+    MaxDistanceLd:
+      name: max_distance_ld
+      in: query
+      required: false
+      description: Only objects whose latest pass came at most this close, in lunar distances.
+      schema:
+        type: number
+        exclusiveMinimum: 0
+        maximum: 10000
+    MinVelocityKmS:
+      name: min_velocity_km_s
+      in: query
+      required: false
+      description: Only objects whose latest pass was at least this fast, in km/s.
+      schema:
+        type: number
+        minimum: 0
+        maximum: 1000
+    MinSeverity:
+      name: min_severity
+      in: query
+      required: false
+      description: Only objects whose latest pass raised an alert at least this severe.
+      schema:
+        $ref: '#/components/schemas/Severity'
+    Watched:
+      name: watched
+      in: query
+      required: false
+      description: Only objects that are (`true`) or are not (`false`) on the watchlist. Added by ADR 0002.
+      schema:
+        type: boolean
+    ApproachFrom:
+      name: approach_from
+      in: query
+      required: false
+      description: Only objects whose latest pass is on or after this date (UTC).
+      schema:
+        type: string
+        format: date
+    ApproachTo:
+      name: approach_to
+      in: query
+      required: false
+      description: Only objects whose latest pass is on or before this date (UTC).
+      schema:
+        type: string
+        format: date
+    Sort:
+      name: sort
+      in: query
+      required: false
+      description: |
+        Sort order; a leading `-` sorts descending. Ties are broken by `neo_reference_id`,
+        so pages are stable.
+      schema:
+        type: string
+        enum: [-approach_date, approach_date, distance, -distance, -velocity, velocity, -diameter, name]
+        default: -approach_date
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Page size.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 25
+    Offset:
+      name: offset
+      in: query
+      required: false
+      description: Number of matching objects to skip.
+      schema:
+        type: integer
+        minimum: 0
+        maximum: 100000
+        default: 0
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        A unique value per logical request (a UUID is ideal). Retries of the same request
+        must send the same key. Kept for 24 hours.
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+        pattern: '^[A-Za-z0-9_.:-]+$'
+  headers:
+    X-Request-ID:
+      description: Identifies this request in the server logs; equal to `request_id` in error bodies.
+      schema:
+        type: string
+    Retry-After:
+      description: Seconds to wait before retrying.
+      schema:
+        type: integer
+        minimum: 1
+  responses:
+    BadRequest:
+      description: The request could not be read (malformed JSON, parameter of the wrong type or out of range).
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/X-Request-ID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: BAD_REQUEST
+            message: The request has invalid parameters.
+            details:
+              - field: query.limit
+                reason: Input should be less than or equal to 100
+            request_id: 6f1c2a9e4b8d4c3e
+            timestamp: '2026-11-22T19:40:00Z'
+    NotFound:
+      description: No object with this ID is stored.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/X-Request-ID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: NOT_FOUND
+            message: No near-Earth object with ID 9999999 is stored.
+            details: []
+            request_id: 6f1c2a9e4b8d4c3e
+            timestamp: '2026-11-22T19:40:00Z'
+    Conflict:
+      description: The object is already on the watchlist.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/X-Request-ID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: ALREADY_WATCHED
+            message: Object 2524522 is already on the watchlist.
+            details:
+              - field: body.neo_reference_id
+                reason: already on the watchlist
+            request_id: 6f1c2a9e4b8d4c3e
+            timestamp: '2026-11-22T19:40:00Z'
+    UnprocessableEntity:
+      description: |
+        The body was read but is not acceptable: a field fails its constraints
+        (`VALIDATION_FAILED`), the object does not exist (`UNKNOWN_OBJECT`), or the
+        idempotency key was already used with a different body (`IDEMPOTENCY_KEY_REUSED`).
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/X-Request-ID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: VALIDATION_FAILED
+            message: The request body failed validation.
+            details:
+              - field: body.priority
+                reason: "Input should be 'low', 'medium', 'high' or 'critical'"
+              - field: body.alert_threshold_ld
+                reason: Input should be less than or equal to 100
+            request_id: 6f1c2a9e4b8d4c3e
+            timestamp: '2026-11-22T19:40:00Z'
+    TooManyRequests:
+      description: Too many requests from this client; retry after the indicated delay.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/Retry-After'
+        X-Request-ID:
+          $ref: '#/components/headers/X-Request-ID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: RATE_LIMITED
+            message: Too many requests; retry in 12 seconds.
+            details: []
+            request_id: 6f1c2a9e4b8d4c3e
+            timestamp: '2026-11-22T19:40:00Z'
+    InternalError:
+      description: An unexpected error; the details are in the server log under the request ID.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/X-Request-ID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: INTERNAL_ERROR
+            message: An unexpected error occurred.
+            details: []
+            request_id: 6f1c2a9e4b8d4c3e
+            timestamp: '2026-11-22T19:40:00Z'
+    ServiceUnavailable:
+      description: The database is unavailable; retry later.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/Retry-After'
+        X-Request-ID:
+          $ref: '#/components/headers/X-Request-ID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: STORAGE_UNAVAILABLE
+            message: The database is unavailable right now; retry later.
+            details: []
+            request_id: 6f1c2a9e4b8d4c3e
+            timestamp: '2026-11-22T19:40:00Z'
+  schemas:
+    NeoReferenceId:
+      type: string
+      description: NASA's reference ID of a near-Earth object.
+      pattern: '^[0-9]{1,20}$'
+      examples: ['2524522']
+    Severity:
+      type: string
+      description: 'Alert severity, from least to most severe: info, watch, warning, critical.'
+      enum: [info, watch, warning, critical]
+    Priority:
+      type: string
+      description: How closely the operator wants to follow the object.
+      enum: [low, medium, high, critical]
+    Approach:
+      type: object
+      description: One close approach of an object to a body.
+      required: [date, orbiting_body, miss_distance_km, miss_distance_ld, relative_velocity_km_s]
+      properties:
+        date:
+          type: string
+          format: date
+          description: Date of closest approach (UTC).
+        orbiting_body:
+          type: string
+          examples: [Earth]
+        miss_distance_km:
+          type: number
+          minimum: 0
+        miss_distance_ld:
+          type: number
+          minimum: 0
+        relative_velocity_km_s:
+          type: number
+          minimum: 0
+    ObjectSummary:
+      type: object
+      required:
+        - neo_reference_id
+        - name
+        - is_potentially_hazardous
+        - is_sentry_object
+        - absolute_magnitude_h
+        - estimated_diameter_min_m
+        - estimated_diameter_max_m
+        - latest_approach
+        - alert_level
+        - watched
+      properties:
+        neo_reference_id:
+          $ref: '#/components/schemas/NeoReferenceId'
+        name:
+          type: string
+          examples: [524522 Zoozve (2002 VE68)]
+        watched:
+          type: boolean
+          description: Whether the object is on the watchlist. Added by ADR 0002.
+        is_potentially_hazardous:
+          type: boolean
+        is_sentry_object:
+          type: boolean
+          description: On NASA's Sentry impact-monitoring list.
+        absolute_magnitude_h:
+          type: [number, 'null']
+          description: Absolute magnitude H; `null` when NASA does not provide it.
+        estimated_diameter_min_m:
+          type: [number, 'null']
+          minimum: 0
+          description: Lower diameter estimate in metres; `null` when unknown.
+        estimated_diameter_max_m:
+          type: [number, 'null']
+          minimum: 0
+          description: Upper diameter estimate in metres; `null` when unknown.
+        latest_approach:
+          description: The newest recorded close approach; `null` if none was reported.
+          oneOf:
+            - $ref: '#/components/schemas/Approach'
+            - type: 'null'
+        alert_level:
+          description: The most severe alert raised for the latest approach; `null` when none was raised.
+          oneOf:
+            - $ref: '#/components/schemas/Severity'
+            - type: 'null'
+    Pagination:
+      type: object
+      required: [total, limit, offset, next_offset, prev_offset]
+      properties:
+        total:
+          type: integer
+          minimum: 0
+          description: Number of objects matching the filters, across all pages.
+        limit:
+          type: integer
+          minimum: 1
+        offset:
+          type: integer
+          minimum: 0
+        next_offset:
+          type: [integer, 'null']
+          minimum: 0
+          description: Offset of the next page; `null` on the last page.
+        prev_offset:
+          type: [integer, 'null']
+          minimum: 0
+          description: Offset of the previous page; `null` on the first page.
+    ObjectPage:
+      type: object
+      required: [items, pagination]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ObjectSummary'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+    Orbit:
+      type: object
+      description: |
+        Orbital elements from the local cache of NASA's `/neo/{id}`. When the orbit is not
+        cached, `tracked` is `false` and every other field is `null`.
+      required:
+        - tracked
+        - fetched_at
+        - orbit_class
+        - semi_major_axis_au
+        - eccentricity
+        - inclination_deg
+        - ascending_node_deg
+        - perihelion_argument_deg
+        - mean_anomaly_deg
+        - epoch_jd
+        - moid_au
+        - moid_ld
+      properties:
+        tracked:
+          type: boolean
+          description: Whether the orbit is in the local cache.
+        fetched_at:
+          type: [string, 'null']
+          format: date-time
+          description: When the orbit was fetched from NASA.
+        orbit_class:
+          type: [string, 'null']
+          description: Orbit class, e.g. APO (Apollo), ATE (Aten), AMO (Amor).
+          examples: [ATE]
+        semi_major_axis_au:
+          type: [number, 'null']
+          exclusiveMinimum: 0
+        eccentricity:
+          type: [number, 'null']
+          minimum: 0
+          exclusiveMaximum: 1
+        inclination_deg:
+          type: [number, 'null']
+          minimum: 0
+          maximum: 180
+        ascending_node_deg:
+          type: [number, 'null']
+        perihelion_argument_deg:
+          type: [number, 'null']
+        mean_anomaly_deg:
+          type: [number, 'null']
+        epoch_jd:
+          type: [number, 'null']
+          description: Epoch of the elements, as a Julian day.
+        moid_au:
+          type: [number, 'null']
+          minimum: 0
+          description: Minimum orbit intersection distance with Earth, in AU.
+        moid_ld:
+          type: [number, 'null']
+          minimum: 0
+          description: The same distance in lunar distances.
+    Alert:
+      type: object
+      required: [rule, severity, approach_date, message, value, threshold]
+      properties:
+        rule:
+          type: string
+          description: The anomaly rule that fired.
+          examples: [hazardous_close_pass]
+        severity:
+          $ref: '#/components/schemas/Severity'
+        approach_date:
+          type: string
+          format: date
+        message:
+          type: string
+        value:
+          type: [number, 'null']
+          description: The measured quantity in the rule's unit; `null` for flag-only rules.
+        threshold:
+          type: [number, 'null']
+          description: The rule's threshold in the same unit; `null` for flag-only rules.
+    ObjectDetail:
+      allOf:
+        - $ref: '#/components/schemas/ObjectSummary'
+        - type: object
+          required: [nasa_jpl_url, orbit, next_predicted_approach, approach_history, alerts, watch]
+          properties:
+            nasa_jpl_url:
+              type: [string, 'null']
+              format: uri
+              description: NASA JPL's page for the object; `null` when not provided.
+            orbit:
+              $ref: '#/components/schemas/Orbit'
+            next_predicted_approach:
+              description: |
+                NASA/JPL's next predicted Earth pass from today on; `null` when the orbit is not
+                cached or none is listed up to 2200.
+              oneOf:
+                - $ref: '#/components/schemas/Approach'
+                - type: 'null'
+            approach_history:
+              type: array
+              description: Recorded close approaches, newest first (at most 50).
+              maxItems: 50
+              items:
+                $ref: '#/components/schemas/Approach'
+            alerts:
+              type: array
+              description: Alerts raised for the object's recorded approaches, most severe first.
+              items:
+                $ref: '#/components/schemas/Alert'
+            watch:
+              description: The object's watchlist entry; `null` when it is not watched.
+              oneOf:
+                - $ref: '#/components/schemas/WatchlistEntry'
+                - type: 'null'
+    WatchlistEntryCreate:
+      type: object
+      additionalProperties: false
+      required: [neo_reference_id, priority]
+      properties:
+        neo_reference_id:
+          $ref: '#/components/schemas/NeoReferenceId'
+        priority:
+          $ref: '#/components/schemas/Priority'
+        alert_threshold_ld:
+          type: [number, 'null']
+          exclusiveMinimum: 0
+          maximum: 100
+          default: null
+          description: Flag the object when a pass comes within this many lunar distances; `null` for no threshold.
+        note:
+          type: [string, 'null']
+          maxLength: 500
+          default: null
+          description: Free text for other operators.
+        tags:
+          type: array
+          maxItems: 5
+          uniqueItems: true
+          default: []
+          items:
+            type: string
+            pattern: '^[a-z0-9][a-z0-9-]{0,23}$'
+          description: Lower-case labels (letters, digits and dashes, at most 24 characters).
+    WatchlistEntry:
+      type: object
+      required: [id, neo_reference_id, name, priority, alert_threshold_ld, note, tags, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        neo_reference_id:
+          $ref: '#/components/schemas/NeoReferenceId'
+        name:
+          type: string
+          description: The object's name, for display.
+        priority:
+          $ref: '#/components/schemas/Priority'
+        alert_threshold_ld:
+          type: [number, 'null']
+        note:
+          type: [string, 'null']
+        tags:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+    WatchlistPage:
+      type: object
+      required: [items, pagination]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/WatchlistEntry'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+    AlertCounts:
+      type: object
+      description: Objects whose latest pass raised an alert, by the most severe level.
+      required: [info, watch, warning, critical]
+      properties:
+        info:
+          type: integer
+          minimum: 0
+        watch:
+          type: integer
+          minimum: 0
+        warning:
+          type: integer
+          minimum: 0
+        critical:
+          type: integer
+          minimum: 0
+    DailyCount:
+      type: object
+      required: [date, count]
+      properties:
+        date:
+          type: string
+          format: date
+        count:
+          type: integer
+          minimum: 0
+    ClosestApproach:
+      type: object
+      required: [neo_reference_id, name, approach]
+      properties:
+        neo_reference_id:
+          $ref: '#/components/schemas/NeoReferenceId'
+        name:
+          type: string
+        approach:
+          $ref: '#/components/schemas/Approach'
+    Summary:
+      type: object
+      required:
+        - total_objects
+        - hazardous_objects
+        - watched_objects
+        - alert_counts
+        - closest_approach
+        - latest_approach_date
+        - last_sync_at
+        - approaches_per_day
+      properties:
+        total_objects:
+          type: integer
+          minimum: 0
+        hazardous_objects:
+          type: integer
+          minimum: 0
+        watched_objects:
+          type: integer
+          minimum: 0
+        alert_counts:
+          $ref: '#/components/schemas/AlertCounts'
+        closest_approach:
+          description: The closest latest pass of any object; `null` when nothing is stored.
+          oneOf:
+            - $ref: '#/components/schemas/ClosestApproach'
+            - type: 'null'
+        latest_approach_date:
+          type: [string, 'null']
+          format: date
+          description: The newest recorded pass; `null` when nothing is stored.
+        last_sync_at:
+          type: [string, 'null']
+          format: date-time
+          description: When the ingestion pipeline last finished successfully; `null` if it never has.
+        approaches_per_day:
+          type: array
+          description: Recorded close approaches per day over the last 14 days (days without any included as 0), oldest first.
+          maxItems: 14
+          items:
+            $ref: '#/components/schemas/DailyCount'
+    ErrorDetail:
+      type: object
+      required: [field, reason]
+      properties:
+        field:
+          type: [string, 'null']
+          description: 'Where the problem is: `body.<field>`, `query.<name>`, `path.<name>` or `header.<name>`; `null` when it concerns the whole request.'
+          examples: [body.priority]
+        reason:
+          type: string
+    ErrorResponse:
+      type: object
+      required: [code, message, details, request_id, timestamp]
+      properties:
+        code:
+          type: string
+          description: Machine-readable error code.
+          enum:
+            - BAD_REQUEST
+            - NOT_FOUND
+            - ALREADY_WATCHED
+            - VALIDATION_FAILED
+            - UNKNOWN_OBJECT
+            - IDEMPOTENCY_KEY_REUSED
+            - RATE_LIMITED
+            - INTERNAL_ERROR
+            - STORAGE_UNAVAILABLE
+        message:
+          type: string
+          description: Human-readable summary, safe to show to users.
+        details:
+          type: array
+          description: Field-level problems; empty when there are none.
+          items:
+            $ref: '#/components/schemas/ErrorDetail'
+        request_id:
+          type: string
+          description: Equal to the `X-Request-ID` response header.
+        timestamp:
+          type: string
+          format: date-time

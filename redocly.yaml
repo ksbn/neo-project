@@ -1,0 +1,3 @@
+# `npx @redocly/cli lint openapi.yaml` reads this: the recommended ruleset, explicitly.
+extends:
+  - recommended

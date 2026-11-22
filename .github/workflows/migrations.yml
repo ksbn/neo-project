@@ -67,6 +67,13 @@ jobs:
           dbmate status
           dbmate up --strict
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Lint the API contract (openapi.yaml, rules in redocly.yaml)
+        run: npx --yes @redocly/cli@2.82.0 lint openapi.yaml
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"

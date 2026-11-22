@@ -61,3 +61,19 @@ class OrbitUnavailable(NeoError):
 
     NASA has none, it isn't elliptical, or NASA is unreachable and none is cached.
     """
+
+
+class NotFound(NeoError):
+    """The requested object is not stored."""
+
+
+class UnknownObject(NeoError):
+    """A write refers to an object that is not stored."""
+
+
+class AlreadyWatched(NeoError):
+    """The object is already on the watchlist (the watchlist's business key)."""
+
+
+class IdempotencyKeyReused(NeoError):
+    """An idempotency key was sent again with a different request body."""

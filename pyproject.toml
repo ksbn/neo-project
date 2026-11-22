@@ -15,6 +15,8 @@ dependencies = [
     "pydantic>=2.7,<3",
     "streamlit>=1.40,<2",
     "pandas>=2.0,<4",
+    "fastapi>=0.165,<1",
+    "uvicorn>=0.54,<1",
 ]
 
 [project.optional-dependencies]
@@ -23,11 +25,17 @@ dev = [
     "responses>=0.25,<1",
     "pyright>=1.1.414,<2",
     "ruff>=0.14,<1",
+    # contract tests: openapi.yaml as JSON Schema, and FastAPI's test client
+    "jsonschema>=4.26,<5",
+    "pyyaml>=6.0,<7",
+    "httpx2>=2.16,<3",
 ]
 
 [project.scripts]
 # `neo-pipeline --start 2026-11-01` == `python -m planetary_defense.cli --start 2026-11-01`
 neo-pipeline = "planetary_defense.cli:main"
+# REST API (openapi.yaml) and the dashboard that consumes it, on http://localhost:8010
+neo-api = "planetary_defense.api.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -35,6 +43,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 # The 3D viewport's HTML template and scene script ship with the package.
 "planetary_defense.ui.components.orbital_3d" = ["frontend/*.html", "frontend/*.js"]
+"planetary_defense.web" = ["static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -60,4 +69,4 @@ select = ["F", "E", "I", "B", "UP"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["planetary_defense"]
-known-local-folder = ["fakes", "support"]
+known-local-folder = ["contract", "fakes", "support"]
