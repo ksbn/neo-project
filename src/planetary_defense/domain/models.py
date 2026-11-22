@@ -218,6 +218,7 @@ class AsteroidSummary:
     close_approach_date: date | None
     miss_distance_km: float | None
     relative_velocity_km_s: float | None = None
+    absolute_magnitude_h: float | None = None
 
 
 @dataclass(frozen=True)
@@ -252,6 +253,7 @@ class AsteroidView:
     status: PipelineStatus | None = None
     history_available: bool = False
     alerts: list[AnomalyAlert] = field(default_factory=list)  # most urgent first
+    trend: list[tuple[date, int]] = field(default_factory=list)  # close approaches per day, oldest first
 
     @property
     def is_empty(self) -> bool:

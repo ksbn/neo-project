@@ -4,10 +4,18 @@ from datetime import date
 
 import pytest
 
-from planetary_defense.application.dashboard_service import FallbackReader, Source, view_from_feed, view_from_store
+from planetary_defense.application.dashboard_service import (
+    FallbackReader,
+    Source,
+    threat_level,
+    view_from_feed,
+    view_from_store,
+    window_summary,
+)
 from planetary_defense.domain.errors import ConfigError, NeoError, StorageError
 from planetary_defense.domain.models import (
     AnomalyAlert,
+    AsteroidSummary,
     AsteroidView,
     PipelineStatus,
     Severity,
@@ -155,3 +163,34 @@ def test_feed_view_scores_alerts_live():
         ("near", "close_approach", Severity.WARNING),
     ]
     assert result.overview.closest_miss_ld == pytest.approx(3.0)
+
+
+# --------------------------------------------------------------------------- #
+# KPI strip figures
+# --------------------------------------------------------------------------- #
+
+TODAY = date(2026, 11, 22)
+
+
+def summary(ref: str, day: date | None, km: float | None) -> AsteroidSummary:
+    return AsteroidSummary(ref, f"({ref})", None, None, False, day, km)
+
+
+def test_window_summary_counts_passes_near_today_and_finds_the_closest():
+    rows = [summary("in-far", date(2026, 11, 20), 9e6), summary("in-near", date(2026, 11, 25), 2e6),
+            summary("too-old", date(2026, 11, 18), 1e5), summary("no-date", None, 1e5)]
+    w = window_summary(rows, TODAY, days=3)
+    assert (w.start, w.end, w.count) == (date(2026, 11, 19), date(2026, 11, 25), 2)
+    assert w.closest is not None and w.closest.neo_reference_id == "in-near"
+    assert w.closest_ld == pytest.approx(2e6 / LUNAR_DISTANCE_KM)
+    assert window_summary([], TODAY).closest is None
+
+
+def test_threat_level_is_the_worst_alert_near_today():
+    def alert(day: date, severity: Severity) -> AnomalyAlert:
+        return AnomalyAlert("r", severity, "x", "(x)", day, "m")
+
+    assert threat_level([], TODAY) is None
+    alerts = [alert(date(2026, 11, 1), Severity.CRITICAL), alert(date(2026, 11, 20), Severity.WATCH),
+              alert(date(2026, 11, 28), Severity.WARNING)]
+    assert threat_level(alerts, TODAY) is Severity.WARNING  # the November 1 critical is outside +-7 days

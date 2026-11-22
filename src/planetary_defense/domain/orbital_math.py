@@ -20,7 +20,7 @@ from datetime import date, datetime, timedelta
 from typing import Final
 
 from planetary_defense.domain.models import OrbitalElements, Trajectory3D, Vec3
-from planetary_defense.domain.units import au_to_ld
+from planetary_defense.domain.units import LUNAR_DISTANCE_KM, au_to_ld
 
 #: Julian day of J2000.0 (2000-01-01 12:00).
 J2000: Final = 2451545.0
@@ -232,4 +232,31 @@ def approach_trajectory(
         closest_point_ld=closest_point,
         miss_distance_ld=miss_distance_ld,
         model_miss_ld=model_miss,
+    )
+
+
+def straight_line_flyby(
+    approach: date | datetime,
+    miss_distance_ld: float,
+    velocity_km_s: float,
+    *,
+    window_days: int = 3,
+    steps_per_day: int = 24,
+) -> Trajectory3D:
+    """An illustrative path when no orbit is available: a straight pass at NASA's miss distance and speed.
+
+    Only the distance and speed are real; the direction is arbitrary (perpendicular to the line to
+    Earth, in the ecliptic plane), so callers must label it as an approximation.
+    """
+    if not miss_distance_ld > 0 or velocity_km_s < 0:
+        raise ValueError("miss_distance_ld must be positive and velocity_km_s not negative")
+    centre = julian_day(approach)
+    ld_per_day = velocity_km_s * 86400 / LUNAR_DISTANCE_KM
+    steps = window_days * steps_per_day
+    times = [centre + k / steps_per_day for k in range(-steps, steps + 1)]
+    points = [Vec3(miss_distance_ld, ld_per_day * (t - centre), 0.0) for t in times]
+    return Trajectory3D(
+        times_jd=times, points_ld=points, closest_index=steps, closest_time_jd=centre,
+        closest_point_ld=Vec3(miss_distance_ld, 0.0, 0.0), miss_distance_ld=miss_distance_ld,
+        model_miss_ld=miss_distance_ld,
     )

@@ -56,6 +56,10 @@ class AsteroidReader(Protocol):
 
     def approach_history(self, neo_reference_id: str, limit: int) -> list[ApproachSummary]: ...
 
+    def daily_approaches(self, since: date) -> list[tuple[date, int]]:
+        """Close approaches per day from ``since`` on, oldest first."""
+        ...
+
 
 class RunLog(Protocol):
     """Keeps a record of pipeline runs (write side)."""

@@ -1,0 +1,13 @@
+# ASTRAEA control-room theme (dark teal/slate). Fine-grained styling lives in src/planetary_defense/ui/theme.py.
+[theme]
+base = "dark"
+primaryColor = "#3fd0c9"
+backgroundColor = "#081219"
+secondaryBackgroundColor = "#0f1e29"
+textColor = "#dbe7ee"
+font = "sans serif"
+
+[client]
+# No "Deploy" / developer toolbar over the command header, and no sidebar navigation.
+toolbarMode = "viewer"
+showSidebarNavigation = false

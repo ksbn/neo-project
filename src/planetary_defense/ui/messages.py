@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Final, Literal
 
 from planetary_defense.domain.errors import (
@@ -119,3 +119,37 @@ def orbit_status(lookup: OrbitLookup, now: datetime) -> str:
     else:
         text = f"Stale orbit from the local cache ({fetched})."
     return f"{text} {lookup.note}" if lookup.note else text
+
+
+# --------------------------------------------------------------------------- #
+# Command header: feed status and manual sync
+# --------------------------------------------------------------------------- #
+
+FeedLevel = Literal["nominal", "watch", "critical"]
+
+
+def feed_status(source: str | None, history_available: bool) -> tuple[str, FeedLevel]:
+    """The header pill's feed state: live from the database, NASA fallback, or offline."""
+    if source is None:
+        return "FEED OFFLINE", "critical"
+    if not history_available:
+        return "NASA FALLBACK", "watch"
+    return "LIVE FEED", "nominal"
+
+
+_SYNC_FAILURES: Final = {
+    1: "a configuration problem (check NASA_API_KEY and the database settings)",
+    3: "NASA being unavailable or rate-limiting",
+    4: "a database error",
+    5: "an error part-way; the days already fetched were saved",
+    7: "an unexpected NASA response",
+}
+
+
+def sync_message(exit_code: int, start: date, end: date) -> tuple[bool, str]:
+    """(ok, text) for a manual feed sync, from the pipeline's exit code."""
+    span = f"{start:%b %d}–{end:%b %d}"
+    if exit_code == 0:
+        return True, f"Feed synced for {span}: data, alerts and run record are up to date."
+    cause = _SYNC_FAILURES.get(exit_code, f"exit code {exit_code}")
+    return False, f"Sync for {span} did not complete because of {cause}. Showing the stored data."

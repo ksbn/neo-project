@@ -29,7 +29,7 @@ def payload(*, with_pass: bool = True, name: str = "524522 Zoozve (2002 VE68)") 
         name=name,
         hazardous=True,
         provenance="Orbit from the local cache.",
-        earth=earth_view_from(LOOKUP, PASS, MISS_LD) if with_pass else None,
+        trajectory=earth_view_from(LOOKUP, PASS, MISS_LD).trajectory if with_pass else None,
         sun=sun_view_from(LOOKUP, PASS, samples=90),
     )
 
@@ -114,12 +114,66 @@ def test_the_scene_script_never_closes_its_own_tag():
 
 def test_inspector_payload_uses_the_latest_pass_or_today():
     from planetary_defense.domain.models import AsteroidSummary
-    from planetary_defense.ui.components.inspector_drawer import viewport_payload
+    from planetary_defense.ui.components.orbit_stage import viewport_payload
 
     row = AsteroidSummary("2524522", "Zoozve", 0.2, 0.45, True, PASS, 6_019_000.0, 9.5)
     with_pass = viewport_payload(LOOKUP, "Zoozve", row, "cached", today=date(2026, 11, 22))
+    assert with_pass is not None
     assert with_pass["earth"]["approach_date"] == "2026-11-02" and with_pass["sun"]["date"] == "2026-11-02"
 
     only_alerted = viewport_payload(LOOKUP, "Zoozve", None, "cached", today=date(2026, 11, 22))
+    assert only_alerted is not None
     assert only_alerted["earth"] is None and only_alerted["sun"]["date"] == "2026-11-22"
     assert only_alerted["hazardous"] is False
+
+
+
+def test_sparkline_scales_values_into_the_box():
+    from planetary_defense.ui.components.kpi_strip import sparkline_svg
+
+    svg = sparkline_svg([1, 5, 3], width=100, height=20)
+    points = [tuple(map(float, p.split(","))) for p in svg.split('<polyline points="')[1].split('"')[0].split()]
+    assert [x for x, _ in points] == [0.0, 50.0, 100.0]
+    assert min(y for _, y in points) == 3.0 and max(y for _, y in points) == 17.0  # 3 px margins
+    assert "<line" in sparkline_svg([4])  # one point: a flat line, no division by zero
+
+
+def test_context_arcs_use_only_cached_orbits_of_other_asteroids():
+    from planetary_defense.ui.components.orbit_stage import context_arcs, context_candidates
+
+    from fakes import control_room_view
+
+    view = control_room_view()
+    candidates = context_candidates(view, selected="2524522")
+    assert "2524522" not in candidates and candidates[:2] == ["b", "a"]  # alert asteroids first
+    arcs = context_arcs(view, "2524522", {"a": LOOKUP})  # only 'a' has a cached orbit
+    assert [name for name, _, _ in arcs] == ["(2001 KF54)"]
+
+
+
+def test_approximate_payload_without_an_orbit():
+    from planetary_defense.domain.orbital_math import straight_line_flyby
+
+    p = build_payload(name="x", hazardous=False, provenance="NASA rate limit", sun=None, approximate=True,
+                      trajectory=straight_line_flyby(PASS, 3.0, 12.0))
+    assert p["approximate"] is True and p["sun"] is None and p["default_mode"] == "earth"
+    assert p["earth"]["miss_ld"] == 3.0
+
+
+def test_payload_needs_something_to_draw():
+    with pytest.raises(ValueError):
+        build_payload(name="x", hazardous=False, provenance="", trajectory=None, sun=None)
+
+
+
+def test_stage_falls_back_to_an_approximate_pass_without_an_orbit():
+    from planetary_defense.domain.models import AsteroidSummary
+    from planetary_defense.ui.components.orbit_stage import viewport_payload
+
+    row = AsteroidSummary("1", "(x)", 0.1, 0.2, False, PASS, 2_000_000.0, 14.0)
+    p = viewport_payload(None, "(x)", row, "rate limited", today=date(2026, 11, 22))
+    assert p is not None and p["approximate"] is True and p["sun"] is None
+    assert p["earth"]["miss_ld"] == pytest.approx(2_000_000 / LUNAR_DISTANCE_KM, abs=1e-3)
+
+    no_pass = AsteroidSummary("1", "(x)", 0.1, 0.2, False, None, None, None)
+    assert viewport_payload(None, "(x)", no_pass, "rate limited", today=date(2026, 11, 22)) is None

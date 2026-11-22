@@ -96,23 +96,22 @@ The schema step and the data step are separate programs, and `run_pipeline.sh` i
 ### 5. Open the Dashboard (optional)
 
 ```bash
-venv/bin/streamlit run app.py   # or `streamlit run app.py` with venv activated
+venv/bin/streamlit run app.py --server.port 8502   # or `streamlit run app.py` with venv activated
 ```
 
 Use the same `venv` as the pipeline (`scripts/run_pipeline.sh` runs `venv/bin/python`), so the dashboard and the pipeline always run the same library versions.
 
-It opens the **Planetary Defense Control Room**:
+It opens **ASTRAEA: Planetary Defense Command**, a dark control-room layout (theme in `.streamlit/config.toml` and `ui/theme.py`):
 
-* **Pipeline status:** when the last run finished and what it saved, a warning if the data is older than 36 hours, or why the last run failed.
-* **KPI bar** over the whole database (computed in SQL): tracked NEOs, potentially hazardous, closest pass (LD), fastest pass (km/s), warnings and critical alerts.
-* **Alerts panel:** the stored anomaly alerts, most urgent first, filterable by severity.
-* **Close approaches:** the newest 5,000 asteroids with miss distance in LD, searchable and filterable.
-* **Inspector:** select a row in either table (or pick from its list) to see the asteroid's latest pass, its alerts, its orbit (orbit class, elements, period, Earth MOID, and whether it came from the local cache or NASA), and its recorded approach history.
-* **3D viewport** (in the inspector), with two views and a toggle inside the viewport:
+* **Command header:** title, an operator / UTC time / feed status pill, and **Sync / Refresh Feed**, which runs the pipeline for the last 3 days with your `NASA_API_KEY` and reloads. If it fails, a non-blocking banner says why and the stored data stays on screen.
+* **KPI strip:** **Threat Level** (worst alert on passes within ±7 days: LOW, GUARDED, ELEVATED, CRITICAL), **Near-Earth Objects** (tracked count with a 14-day approaches-per-day sparkline), **Close Approaches** in a ±3-day window with the closest pass, and **Global Defense Readiness** (NOMINAL, DEGRADED, IMPAIRED, STANDBY, with the last sync). All from stored data.
+* **Left column:** **Hazard Alerts** (severity-badged cards with pass time, size and reason; **Track** selects the asteroid) and **Close Approach Data** (Object Name, Date (UTC), Distance (LD) coloured by tier: under 1 LD critical, 1–5 LD warning, Velocity, Diameter (m)). Selecting a row tracks it.
+* **Right column:** the **3D Space Viewport** for the tracked asteroid and its **Orbital Telemetry Readouts** (object and ID, inclination, eccentricity, semi-major axis, H, diameter, minimum Earth distance in LD and km, Earth MOID) with Live Feed / Data Synced / Orbit status indicators. Alerts and the approach history are in an expander below.
+* The 3D viewport has two views and a toggle inside it:
   * **Earth-centred:** Earth, the 1 LD ring (the Moon's distance), scale rings, and the asteroid's path 3 days either side of its latest pass. The direction comes from the orbits of the asteroid and Earth; the closest point is drawn at NASA's miss distance, and the legend shows what the orbit model alone predicted (for 2001 KF54: 18.74 LD vs NASA's 18.84 LD).
   * **Sun-centred:** the Sun, Earth's orbit and the asteroid's orbit, with both bodies placed on the pass date.
 
-  Paths and orbits are to scale; the Earth and Sun spheres are enlarged and the legend says by how much. three.js is loaded from cdn.jsdelivr.net (pinned to one release), so the viewport needs internet access; without it, it says so and the rest of the page works.
+  The orbit is read from the local `orbital_elements` cache; NASA's `/neo/{id}` is called only on a miss, and the result is cached. If NASA has no usable orbit or can't be reached, the viewport shows a clearly labelled straight-line pass at NASA's miss distance and speed instead. Paths and orbits are to scale; the Earth and Sun spheres are enlarged and the legend says by how much. three.js is loaded from cdn.jsdelivr.net (pinned to one release), so the viewport needs internet access; without it, it says so and the rest of the page works.
 
 If the database is unavailable or empty it falls back to the live NASA API (last 3 days, one quick retry, so the page never waits minutes on a rate limit), and scores alerts on the fly. Pipeline status and history come from the database only. Each part degrades on its own: if, say, the alerts table doesn't exist yet, the rest of the page still loads.
 
@@ -152,7 +151,8 @@ src/planetary_defense/
     ├── app.py              # LiveDashboard (sources, caches, breakers) and the page layout (render)
     ├── state.py            # Which asteroid the inspector shows (shared by tables and picker)
     ├── messages.py         # How the dashboard words errors, pipeline status and orbit provenance
-    └── components/         # kpi_bar, alerts_panel, approach_table, inspector_drawer
+    ├── theme.py            # ASTRAEA palette, severity colours, styling layer
+    └── components/         # command_header, kpi_strip, hazard_alerts, approach_table, orbit_stage
         └── orbital_3d/     # bridge.py (geometry -> JSON -> page) and frontend/ (index.html, scene.js)
 ```
 

@@ -3,7 +3,7 @@
 from datetime import UTC, date, datetime, timedelta
 
 from planetary_defense.domain.models import IngestionRun, OrbitLookup, OrbitOrigin, PipelineStatus, RunStatus
-from planetary_defense.ui.messages import orbit_status, run_health
+from planetary_defense.ui.messages import feed_status, orbit_status, run_health, sync_message
 
 from fakes import zoozve_orbit
 
@@ -67,3 +67,18 @@ def test_orbit_status_says_where_the_orbit_came_from():
 def test_time_ago_uses_singular_for_one_hour():
     run = a_run(RunStatus.SUCCESS, hours_ago=1.2)
     assert "(1 hour ago)" in run_health(PipelineStatus(run, run.finished_at), NOW).text
+
+
+def test_feed_status_pill():
+    assert feed_status("PostgreSQL database", True) == ("LIVE FEED", "nominal")
+    assert feed_status("NASA NeoWs API (live fallback)", False) == ("NASA FALLBACK", "watch")
+    assert feed_status(None, False) == ("FEED OFFLINE", "critical")
+
+
+def test_sync_messages_from_exit_codes():
+    start, end = date(2026, 11, 20), date(2026, 11, 22)
+    ok, text = sync_message(0, start, end)
+    assert ok and "Nov 20–Nov 22" in text
+    ok, text = sync_message(3, start, end)
+    assert not ok and "rate-limiting" in text and "stored data" in text
+    assert "exit code 42" in sync_message(42, start, end)[1]

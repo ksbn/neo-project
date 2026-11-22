@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, date, datetime
 
-from planetary_defense.application.dashboard_service import LoadResult
+from planetary_defense.application.dashboard_service import LoadResult, SyncReport
 from planetary_defense.domain.errors import OrbitUnavailable, StorageError, UpstreamUnavailable
 from planetary_defense.domain.models import (
     AnomalyAlert,
@@ -99,6 +99,9 @@ class StubReader:
 
     def approach_history(self, neo_reference_id: str, limit: int) -> list[ApproachSummary]:
         return []
+
+    def daily_approaches(self, since: date) -> list[tuple[date, int]]:
+        return [(since, 2)]
 
 
 LAST_RUN = IngestionRun(
@@ -233,10 +236,12 @@ def control_room_view(*, live: bool = False) -> AsteroidView:
     ]
     overview = Overview(total=3, hazardous=2, latest_approach=date(2026, 11, 20), approaches=4,
                         closest_miss_ld=15.65, fastest_km_s=36.9)
+    trend = [(date(2026, 11, d), n) for d, n in ((16, 3), (17, 5), (18, 4), (19, 7), (20, 6))]
     if live:
-        return AsteroidView(overview=overview, rows=rows, alerts=alerts)
+        return AsteroidView(overview=overview, rows=rows, alerts=alerts, trend=trend)
     status = PipelineStatus(last_run=LAST_RUN, last_success_at=LAST_RUN.finished_at)
-    return AsteroidView(overview=overview, rows=rows, status=status, history_available=True, alerts=alerts)
+    return AsteroidView(overview=overview, rows=rows, status=status, history_available=True, alerts=alerts,
+                        trend=trend)
 
 
 class FakeDashboard:
@@ -263,5 +268,13 @@ class FakeDashboard:
         return OrbitLookup(replace(zoozve_orbit(), neo_reference_id=neo_reference_id),
                            datetime(2026, 11, 20, 8, 0, tzinfo=UTC), OrbitOrigin.CACHE)
 
+    def cached_orbits(self, neo_reference_ids: list[str]) -> dict[str, OrbitLookup]:
+        if self.orbit_fails:
+            return {}
+        return {ref: self.orbit(ref) for ref in neo_reference_ids}
+
     def refresh(self) -> None:
         self.refreshed += 1
+
+    def sync(self) -> SyncReport:
+        return SyncReport(ok=False, message="Sync did not complete because of NASA being unavailable.")

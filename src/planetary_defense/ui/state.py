@@ -12,7 +12,7 @@ import streamlit as st
 
 from planetary_defense.domain.models import AsteroidView
 
-SELECTED = "inspect_neo"
+SELECTED = "selected_neo_id"
 
 
 def default_selection(view: AsteroidView) -> str | None:
@@ -40,3 +40,8 @@ def on_row_selected(table_key: str, ids: list[str]) -> Callable[[], None]:
             st.session_state[SELECTED] = ids[rows[0]]
 
     return callback
+
+
+def select(neo_reference_id: str) -> None:
+    """Button callback: inspect this asteroid."""
+    st.session_state[SELECTED] = neo_reference_id
