@@ -130,14 +130,15 @@ src/planetary_defense/
 │   ├── anomaly_rules.py    # Composable alert rules (distance tiers, velocity, size, hazard flag) and thresholds
 │   └── orbital_math.py     # Kepler solver, positions, Earth ephemeris, orbit paths, approach trajectories
 ├── application/
-│   ├── ports.py            # Protocols: FeedSource, AsteroidStore, AsteroidReader, RunLog, RunReader
-│   ├── ingest_feed.py      # IngestService, LogObserver, IngestionRunRecorder, DryRunStore
+│   ├── ports.py            # Protocols: feed, stores, readers, run log, alerts, orbit source and cache
+│   ├── ingest_feed.py      # IngestService, LogObserver, IngestionRunRecorder, AlertRecorder, DryRunStore
+│   ├── enrich_orbit.py     # OrbitEnricher: cache-first /neo/{id} lookups, Earth- and Sun-centred views
 │   └── dashboard_service.py# Dashboard views from a store or a feed; FallbackReader
 ├── infrastructure/
-│   ├── nasa_client.py      # NASA HTTP client: retry profiles, HTTP errors to typed errors
+│   ├── nasa_client.py      # NASA HTTP client (/feed, /neo/{id}): retry profiles, HTTP errors to typed errors
 │   ├── nasa_dto.py         # NASA JSON shapes, validation, mapping to Observation
 │   ├── db.py               # PostgreSQL connections
-│   ├── repository.py       # AsteroidRepository, IngestionRunRepository
+│   ├── repository.py       # Asteroid, IngestionRun, Orbit (cache) and Alert repositories
 │   └── error_boundary.py   # CircuitBreaker for interactive callers
 └── ui/
     ├── app.py              # Dashboard wiring (sources, caches, breakers) and rendering
@@ -145,6 +146,13 @@ src/planetary_defense/
 ```
 
 Adapters translate library exceptions (`requests`, `pydantic`, `psycopg`) into `NeoError` subclasses. Entry points catch only `NeoError`; anything else is a bug and crashes with a traceback instead of being reported as an outage. How an error is presented is decided by each entry point: `cli.CLI_OUTCOMES` (exit code and log label) and `ui.messages.UI_MESSAGES` (dashboard text).
+
+### Two tiers of data
+
+* **Tier 1, batch (`/feed`):** each pipeline window is validated, stored, and scored by the anomaly rules; `AlertRecorder` saves the alerts to `anomaly_alerts`. Re-running a date range replaces that range's alerts, so changed thresholds apply to it.
+* **Tier 2, lazy enrichment (`/neo/{id}`):** `OrbitEnricher.lookup` reads `orbital_elements` first and asks NASA only on a miss or when the cached orbit is older than `ORBIT_CACHE_MAX_AGE_DAYS` (30). If NASA is down or rate-limited it serves the stale copy with a note; with nothing cached it raises `OrbitUnavailable`. A broken cache never blocks a fresh fetch. A cache hit takes milliseconds; NASA took about 2 s.
+
+Thresholds and the cache age can be overridden in `.env` (see `.env.example`).
 
 ### Anomaly rules and orbital math
 
@@ -196,6 +204,8 @@ docker compose run --rm migrate up                # apply pending migrations
 | `20261118000000_create_asteroids` | `asteroids`: current state, one row per asteroid with its newest close approach |
 | `20261122120000_create_close_approaches` | `close_approaches`: every recorded pass (history), seeded from `asteroids` |
 | `20261122120100_create_ingestion_runs` | `ingestion_runs`: one row per pipeline run, shown on the dashboard |
+| `20261122140000_create_orbital_elements` | `orbital_elements`: cached orbits from `/neo/{id}` (any NEO, no foreign key) |
+| `20261122140100_create_anomaly_alerts` | `anomaly_alerts`: alerts per close approach and rule, scored at ingest |
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#5-how-the-data-is-stored) for how they are written.
 

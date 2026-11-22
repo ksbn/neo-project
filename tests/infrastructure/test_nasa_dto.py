@@ -6,10 +6,10 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from planetary_defense.domain.errors import FeedContractError
-from planetary_defense.infrastructure.nasa_dto import parse_feed
+from planetary_defense.domain.errors import FeedContractError, OrbitUnavailable
+from planetary_defense.infrastructure.nasa_dto import parse_feed, parse_orbit
 
-from support import make_feed, make_neo
+from support import make_feed, make_neo, make_neo_detail
 
 
 def test_parses_nested_dates_and_coerces_numeric_strings():
@@ -101,3 +101,52 @@ def test_values_that_overflow_db_columns_are_rejected_per_record(field, value, a
 
     ids = {o.neo_reference_id for o in result.observations}
     assert ids == ({"1", "2"} if accepted else {"2"})  # the other record is never affected
+
+
+# --------------------------------------------------------------------------- #
+# /neo/{id} orbital data
+# --------------------------------------------------------------------------- #
+
+
+def test_parses_real_orbital_data_including_leading_dot_numbers():
+    orbit = parse_orbit(make_neo_detail())
+
+    assert orbit.neo_reference_id == "2524522"
+    el = orbit.elements
+    assert el.semi_major_axis_au == pytest.approx(0.72356318914361)  # sent as ".72356318914361"
+    assert el.eccentricity == pytest.approx(0.4101013489730946)
+    assert (el.inclination_deg, el.ascending_node_deg) == pytest.approx((9.037338276017495, 231.4572421200886))
+    assert (el.perihelion_argument_deg, el.mean_anomaly_deg) == pytest.approx((355.3998989862241, 288.8364601767468))
+    assert el.epoch_jd == 2461200.5
+    assert (orbit.orbit_id, orbit.orbit_class, orbit.moid_au) == ("111", "ATE", pytest.approx(0.025508))
+
+
+def test_optional_orbit_metadata_may_be_missing():
+    detail = make_neo_detail()
+    for key in ("orbit_id", "orbit_class", "minimum_orbit_intersection"):
+        del detail["orbital_data"][key]
+    orbit = parse_orbit(detail)
+    assert (orbit.orbit_id, orbit.orbit_class, orbit.moid_au) == (None, None, None)
+
+
+def test_an_asteroid_without_orbital_data_has_no_orbit():
+    with pytest.raises(OrbitUnavailable, match="no orbital elements"):
+        parse_orbit(make_neo_detail(without_orbit=True))
+
+
+@pytest.mark.parametrize("field", ["semi_major_axis", "eccentricity", "mean_anomaly", "epoch_osculation"])
+def test_missing_elements_mean_no_usable_orbit(field):
+    detail = make_neo_detail()
+    del detail["orbital_data"][field]
+    with pytest.raises(OrbitUnavailable, match=field):
+        parse_orbit(detail)
+
+
+def test_a_hyperbolic_orbit_is_not_drawable():
+    with pytest.raises(OrbitUnavailable, match="eccentricity"):
+        parse_orbit(make_neo_detail(eccentricity="1.2"))
+
+
+def test_garbled_orbital_data_is_a_contract_error():
+    with pytest.raises(FeedContractError, match="inclination"):
+        parse_orbit(make_neo_detail(inclination="not a number"))

@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime, timedelta
 import pytest
 
 from planetary_defense.application.ingest_feed import (
+    AlertRecorder,
     DryRunStore,
     IngestionRunRecorder,
     IngestService,
@@ -14,11 +15,12 @@ from planetary_defense.application.ingest_feed import (
     WindowFailed,
     WindowReport,
 )
+from planetary_defense.domain.anomaly_rules import high_velocity
 from planetary_defense.domain.errors import NeoError, StorageError, UpstreamUnavailable
 from planetary_defense.domain.models import FeedBatch, RunStatus
 from planetary_defense.infrastructure.nasa_dto import parse_feed
 
-from fakes import FakeFeed, FakeRunLog, InMemoryStore
+from fakes import AlertStoreSpy, FakeFeed, FakeRunLog, InMemoryStore
 from support import make_feed, make_neo
 
 
@@ -150,3 +152,27 @@ def test_recorder_failure_does_not_change_the_run(caplog):
     )
     assert stats.windows_done == 1
     assert "Could not record the pipeline run" in caplog.text
+
+
+# --------------------------------------------------------------------------- #
+# AlertRecorder
+# --------------------------------------------------------------------------- #
+
+
+def test_alert_recorder_scores_each_window_and_replaces_its_alerts():
+    spy = AlertStoreSpy()
+    recorder = AlertRecorder([high_velocity(10.0)], spy)  # test NEOs fly at 12.3 km/s
+    IngestService(FakeFeed(), InMemoryStore(), [recorder]).run(date(2026, 11, 1), date(2026, 11, 8))
+
+    assert len(spy.calls) == 2  # one replace per window
+    passes, alerts = spy.calls[0]
+    assert passes == [(f"2026110{d}", date(2026, 11, d)) for d in range(1, 8)]
+    assert [(a.neo_reference_id, a.rule) for a in alerts] == [(ref, "high_velocity") for ref, _ in passes]
+    assert recorder.raised == 8
+
+
+def test_alert_recorder_is_best_effort(caplog):
+    recorder = AlertRecorder([high_velocity(10.0)], AlertStoreSpy(fail=StorageError("disk full")))
+    stats = IngestService(FakeFeed(), InMemoryStore(), [recorder]).run(date(2026, 11, 1), date(2026, 11, 1))
+    assert stats.windows_done == 1
+    assert "Could not save alerts" in caplog.text

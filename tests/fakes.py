@@ -6,16 +6,21 @@ Pyright checks that every fake still matches its Protocol (``tests/application/t
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, date, datetime
 
 from planetary_defense.domain.errors import StorageError, UpstreamUnavailable
 from planetary_defense.domain.models import (
+    AnomalyAlert,
     ApproachSummary,
     AsteroidSummary,
     AsteroidView,
+    CachedOrbit,
     FeedBatch,
     IngestionRun,
     Observation,
+    OrbitalElements,
+    OrbitData,
     Overview,
     PipelineStatus,
     RunStatus,
@@ -126,3 +131,64 @@ class RunLogSpy:
 
     def record(self, run: IngestionRun) -> None:
         self.runs.append(run)
+
+
+# --------------------------------------------------------------------------- #
+# Orbit enrichment
+# --------------------------------------------------------------------------- #
+
+
+def zoozve_orbit() -> OrbitData:
+    """Zoozve's real elements (see support.ZOOZVE_ORBITAL_DATA)."""
+    return OrbitData(
+        neo_reference_id="2524522",
+        elements=OrbitalElements(
+            semi_major_axis_au=0.72356318914361, eccentricity=0.4101013489730946, inclination_deg=9.037338276017495,
+            ascending_node_deg=231.4572421200886, perihelion_argument_deg=355.3998989862241,
+            mean_anomaly_deg=288.8364601767468, epoch_jd=2461200.5,
+        ),
+        orbit_id="111",
+        orbit_class="ATE",
+        moid_au=0.025508,
+    )
+
+
+class FakeOrbitSource:
+    """NASA's /neo/{id}: returns Zoozve's orbit (re-labelled with the requested id), or raises ``fail``."""
+
+    def __init__(self, fail: Exception | None = None) -> None:
+        self.fail = fail
+        self.calls: list[str] = []
+
+    def fetch_orbit(self, neo_reference_id: str) -> OrbitData:
+        self.calls.append(neo_reference_id)
+        if self.fail is not None:
+            raise self.fail
+        return replace(zoozve_orbit(), neo_reference_id=neo_reference_id)
+
+
+class InMemoryOrbitCache:
+    def __init__(self, fail_get: Exception | None = None, fail_put: Exception | None = None) -> None:
+        self.orbits: dict[str, CachedOrbit] = {}
+        self.fail_get, self.fail_put = fail_get, fail_put
+
+    def get_orbit(self, neo_reference_id: str) -> CachedOrbit | None:
+        if self.fail_get is not None:
+            raise self.fail_get
+        return self.orbits.get(neo_reference_id)
+
+    def put_orbit(self, orbit: CachedOrbit) -> None:
+        if self.fail_put is not None:
+            raise self.fail_put
+        self.orbits[orbit.orbit.neo_reference_id] = orbit
+
+
+class AlertStoreSpy:
+    def __init__(self, fail: Exception | None = None) -> None:
+        self.calls: list[tuple[list[tuple[str, date]], list[AnomalyAlert]]] = []
+        self.fail = fail
+
+    def replace_alerts(self, passes: Sequence[tuple[str, date]], alerts: Sequence[AnomalyAlert]) -> None:
+        if self.fail is not None:
+            raise self.fail
+        self.calls.append((list(passes), list(alerts)))

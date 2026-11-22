@@ -15,6 +15,7 @@ so it never appears in URLs, exception messages or urllib3 debug logs.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from datetime import date
 from types import TracebackType
@@ -29,20 +30,22 @@ from urllib3.util.retry import Retry
 
 from planetary_defense.domain.errors import (
     FeedContractError,
+    OrbitUnavailable,
     UpstreamAuthError,
     UpstreamError,
     UpstreamRateLimited,
     UpstreamRequestError,
     UpstreamUnavailable,
 )
-from planetary_defense.domain.models import FeedBatch
-from planetary_defense.infrastructure.nasa_dto import parse_feed
+from planetary_defense.domain.models import FeedBatch, OrbitData
+from planetary_defense.infrastructure.nasa_dto import parse_feed, parse_orbit
 
 logger = logging.getLogger(__name__)
 
 BASE_URL: Final = "https://api.nasa.gov/neo/rest/v1"
 # NeoWs rejects feed requests spanning more than 7 days; 7 inclusive days is safe.
 MAX_FEED_DAYS: Final = 7
+_NEO_ID: Final = re.compile(r"[0-9]{1,20}")
 RETRY_STATUS_CODES: Final = frozenset({429, 500, 502, 503, 504})
 # Upper bound on a server-supplied Retry-After; urllib3's own default is 6 hours.
 MAX_RETRY_AFTER_SECONDS: Final = 60.0
@@ -232,6 +235,32 @@ class NeoWsClient:
             UpstreamError: Transport/HTTP failure, or ``FeedContractError`` if the envelope is malformed.
         """
         return parse_feed(self.get_feed(start_date, end_date))
+
+    def get_neo(self, neo_reference_id: str) -> dict[str, Any]:
+        """Fetch the raw ``/neo/{id}`` record (orbit and full close-approach history).
+
+        Raises:
+            ValueError: ``neo_reference_id`` is not a NASA id (digits only), so no URL is built from it.
+            UpstreamError: A subclass describing the failure; see ``domain/errors.py``.
+        """
+        if not _NEO_ID.fullmatch(neo_reference_id):
+            raise ValueError(f"neo_reference_id must be 1-20 ASCII digits, got {neo_reference_id!r}")
+        return self._get(f"neo/{neo_reference_id}", params={})
+
+    def fetch_orbit(self, neo_reference_id: str) -> OrbitData:
+        """The asteroid's orbit. Satisfies :class:`application.ports.OrbitSource`.
+
+        Raises:
+            OrbitUnavailable: NASA has no such asteroid, or no usable orbit for it.
+            UpstreamError: NASA could not be reached or answered with an error.
+        """
+        try:
+            payload = self.get_neo(neo_reference_id)
+        except UpstreamRequestError as exc:
+            if exc.status_code == 404:
+                raise OrbitUnavailable(f"NASA has no asteroid {neo_reference_id}") from exc
+            raise
+        return parse_orbit(payload)
 
     def _get(self, path: str, params: dict[str, str]) -> dict[str, Any]:
         """GET ``path`` and return the decoded JSON object, raising an UpstreamError subclass on failure."""

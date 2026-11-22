@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable, Sequence
+from datetime import date
 from typing import Any, Final
 
 import psycopg
@@ -31,18 +32,23 @@ from psycopg.rows import dict_row
 
 from planetary_defense.domain.errors import StorageError
 from planetary_defense.domain.models import (
+    AnomalyAlert,
     ApproachSummary,
     AsteroidSummary,
+    CachedOrbit,
     IngestionRun,
     Observation,
+    OrbitalElements,
+    OrbitData,
     Overview,
     PipelineStatus,
     RunStatus,
+    Severity,
     UpsertResult,
     latest,
 )
 
-__all__ = ["AsteroidRepository", "IngestionRunRepository", "UpsertResult"]
+__all__ = ["AlertRepository", "AsteroidRepository", "IngestionRunRepository", "OrbitRepository", "UpsertResult"]
 
 logger = logging.getLogger(__name__)
 
@@ -351,3 +357,153 @@ class IngestionRunRepository:
             raise _storage_error("Reading pipeline status", exc) from exc
         last_run = IngestionRun(**{**row, "status": RunStatus(row["status"])}) if row else None
         return PipelineStatus(last_run=last_run, last_success_at=success["at"] if success else None)
+
+
+# --------------------------------------------------------------------------- #
+# Orbit cache (orbital_elements)
+# --------------------------------------------------------------------------- #
+
+_ORBIT_COLUMNS: Final = (
+    "neo_reference_id", "semi_major_axis_au", "eccentricity", "inclination_deg", "ascending_node_deg",
+    "perihelion_argument_deg", "mean_anomaly_deg", "epoch_jd", "orbit_id", "orbit_class", "moid_au", "fetched_at",
+)
+
+
+class OrbitRepository:
+    """The ``orbital_elements`` table. Satisfies :class:`application.ports.OrbitCache`."""
+
+    def __init__(self, conn: psycopg.Connection) -> None:
+        self._conn = conn
+
+    def get_orbit(self, neo_reference_id: str) -> CachedOrbit | None:
+        query = sql.SQL("SELECT {cols} FROM orbital_elements WHERE neo_reference_id = %s").format(
+            cols=sql.SQL(", ").join(map(sql.Identifier, _ORBIT_COLUMNS))
+        )
+        try:
+            with self._conn.transaction(), self._conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(query, (neo_reference_id,))
+                row = cur.fetchone()
+        except psycopg.Error as exc:
+            raise _storage_error("Reading the orbit cache", exc) from exc
+        if row is None:
+            return None
+        elements = OrbitalElements(
+            semi_major_axis_au=row["semi_major_axis_au"], eccentricity=row["eccentricity"],
+            inclination_deg=row["inclination_deg"], ascending_node_deg=row["ascending_node_deg"],
+            perihelion_argument_deg=row["perihelion_argument_deg"], mean_anomaly_deg=row["mean_anomaly_deg"],
+            epoch_jd=row["epoch_jd"],
+        )
+        orbit = OrbitData(
+            neo_reference_id=row["neo_reference_id"], elements=elements, orbit_id=row["orbit_id"],
+            orbit_class=row["orbit_class"], moid_au=row["moid_au"],
+        )
+        return CachedOrbit(orbit=orbit, fetched_at=row["fetched_at"])
+
+    def put_orbit(self, orbit: CachedOrbit) -> None:
+        data, el = orbit.orbit, orbit.orbit.elements
+        values = {
+            "neo_reference_id": data.neo_reference_id, "semi_major_axis_au": el.semi_major_axis_au,
+            "eccentricity": el.eccentricity, "inclination_deg": el.inclination_deg,
+            "ascending_node_deg": el.ascending_node_deg, "perihelion_argument_deg": el.perihelion_argument_deg,
+            "mean_anomaly_deg": el.mean_anomaly_deg, "epoch_jd": el.epoch_jd, "orbit_id": data.orbit_id,
+            "orbit_class": data.orbit_class, "moid_au": data.moid_au, "fetched_at": orbit.fetched_at,
+        }
+        query = sql.SQL(
+            "INSERT INTO orbital_elements ({cols}) VALUES ({vals}) "
+            "ON CONFLICT (neo_reference_id) DO UPDATE SET {updates}"
+        ).format(
+            cols=sql.SQL(", ").join(map(sql.Identifier, _ORBIT_COLUMNS)),
+            vals=sql.SQL(", ").join(map(sql.Placeholder, _ORBIT_COLUMNS)),
+            updates=sql.SQL(", ").join(
+                sql.SQL("{c} = EXCLUDED.{c}").format(c=sql.Identifier(c)) for c in _ORBIT_COLUMNS[1:]
+            ),
+        )
+        try:
+            with self._conn.transaction():
+                self._conn.execute(query, values)
+        except psycopg.Error as exc:
+            raise _storage_error("Caching the orbit", exc) from exc
+
+
+# --------------------------------------------------------------------------- #
+# Alerts (anomaly_alerts)
+# --------------------------------------------------------------------------- #
+
+_ALERT_UPSERT_SQL: Final = """
+    INSERT INTO anomaly_alerts
+        (neo_reference_id, close_approach_date, rule, severity, message, value, threshold)
+    VALUES
+        (%(neo_reference_id)s, %(close_approach_date)s, %(rule)s, %(severity)s, %(message)s, %(value)s, %(threshold)s)
+    ON CONFLICT (neo_reference_id, close_approach_date, rule) DO UPDATE
+    SET severity = EXCLUDED.severity, message = EXCLUDED.message, value = EXCLUDED.value,
+        threshold = EXCLUDED.threshold, updated_at = NOW()
+    WHERE (anomaly_alerts.severity, anomaly_alerts.message, anomaly_alerts.value, anomaly_alerts.threshold)
+          IS DISTINCT FROM (EXCLUDED.severity, EXCLUDED.message, EXCLUDED.value, EXCLUDED.threshold)
+"""
+
+# Alerts of the given passes that are not in the current set: rules that no longer fire.
+_ALERT_PRUNE_SQL: Final = """
+    DELETE FROM anomaly_alerts a
+    USING unnest(%s::text[], %s::date[]) AS p(neo, day)
+    WHERE a.neo_reference_id = p.neo AND a.close_approach_date = p.day
+      AND (a.neo_reference_id, a.close_approach_date, a.rule) NOT IN (
+          SELECT * FROM unnest(%s::text[], %s::date[], %s::text[]))
+"""
+
+
+class AlertRepository:
+    """The ``anomaly_alerts`` table. Satisfies :class:`application.ports.AlertStore`."""
+
+    def __init__(self, conn: psycopg.Connection) -> None:
+        self._conn = conn
+
+    def replace_alerts(self, passes: Sequence[tuple[str, date]], alerts: Sequence[AnomalyAlert]) -> None:
+        """Make ``alerts`` the complete set for ``passes``, atomically. Alerts without a date are skipped.
+
+        Unchanged alerts are left untouched, so ``raised_at`` records when an alert first appeared.
+        """
+        passes = list(dict.fromkeys(passes))
+        current = {
+            (a.neo_reference_id, a.close_approach_date, a.rule): a for a in alerts if a.close_approach_date is not None
+        }
+        rows = [
+            {
+                "neo_reference_id": a.neo_reference_id, "close_approach_date": a.close_approach_date, "rule": a.rule,
+                "severity": int(a.severity), "message": a.message, "value": a.value, "threshold": a.threshold,
+            }
+            for a in current.values()
+        ]
+        keep = list(current)
+        try:
+            with self._conn.transaction(), self._conn.cursor() as cur:
+                if rows:
+                    cur.executemany(_ALERT_UPSERT_SQL, rows)
+                if passes:
+                    cur.execute(
+                        _ALERT_PRUNE_SQL,
+                        ([p[0] for p in passes], [p[1] for p in passes],
+                         [k[0] for k in keep], [k[1] for k in keep], [k[2] for k in keep]),
+                    )
+        except psycopg.Error as exc:
+            raise _storage_error("Saving alerts", exc) from exc
+
+    def recent_alerts(self, min_severity: Severity = Severity.INFO, limit: int = 200) -> list[AnomalyAlert]:
+        """Alerts at or above ``min_severity``: most urgent first, then the newest passes."""
+        query = """
+            SELECT a.rule, a.severity, a.neo_reference_id, s.name, a.close_approach_date, a.message, a.value,
+                   a.threshold
+            FROM anomaly_alerts a JOIN asteroids s USING (neo_reference_id)
+            WHERE a.severity >= %s
+            ORDER BY a.severity DESC, a.close_approach_date DESC, a.rule, a.neo_reference_id
+            LIMIT %s
+        """
+        try:
+            with self._conn.transaction(), self._conn.cursor() as cur:
+                cur.execute(query, (int(min_severity), limit))
+                rows = cur.fetchall()
+        except psycopg.Error as exc:
+            raise _storage_error("Listing alerts", exc) from exc
+        return [
+            AnomalyAlert(rule, Severity(severity), ref, name, day, message, value, threshold)
+            for rule, severity, ref, name, day, message, value, threshold in rows
+        ]

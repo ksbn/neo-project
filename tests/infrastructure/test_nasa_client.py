@@ -20,6 +20,7 @@ from responses import matchers
 
 from planetary_defense.domain.errors import (
     FeedContractError,
+    OrbitUnavailable,
     UpstreamAuthError,
     UpstreamRateLimited,
     UpstreamRequestError,
@@ -34,7 +35,7 @@ from planetary_defense.infrastructure.nasa_client import (
     _CappedRetry,
 )
 
-from support import INVALID_KEY, make_feed, make_neo
+from support import INVALID_KEY, make_feed, make_neo, make_neo_detail
 
 FEED = f"{BASE_URL}/feed"
 D1, D2 = date(2026, 11, 10), date(2026, 11, 12)
@@ -283,3 +284,38 @@ def test_user_agent_identifies_the_caller():
 
 def _adapter(client: NeoWsClient, url: str) -> HTTPAdapter:
     return cast(HTTPAdapter, client._session.get_adapter(url))
+
+
+# --------------------------------------------------------------------------- #
+# /neo/{id}
+# --------------------------------------------------------------------------- #
+
+NEO = f"{BASE_URL}/neo/2524522"
+
+
+@responses.activate
+def test_fetch_orbit_calls_neo_lookup_with_the_key_in_a_header(client):
+    responses.get(NEO, json=make_neo_detail(), match=[matchers.header_matcher({"X-Api-Key": "test-key"})])
+    orbit = client.fetch_orbit("2524522")
+    assert orbit.orbit_class == "ATE" and orbit.elements.epoch_jd == 2461200.5
+
+
+@responses.activate
+def test_unknown_asteroid_has_no_orbit(client):
+    responses.get(f"{BASE_URL}/neo/1", status=404, json={"code": 404, "error_message": "Not Found"})
+    with pytest.raises(OrbitUnavailable, match="no asteroid 1"):
+        client.fetch_orbit("1")
+    assert len(responses.calls) == 1  # not retried
+
+
+@responses.activate
+def test_orbit_lookup_outages_stay_upstream_errors(client):
+    responses.get(NEO, status=503)
+    with pytest.raises(UpstreamUnavailable):
+        client.fetch_orbit("2524522")
+
+
+@pytest.mark.parametrize("bad_id", ["", "12a", "../feed", "1/2", " 1"])
+def test_ids_are_validated_before_building_the_url(client, bad_id):
+    with pytest.raises(ValueError, match="neo_reference_id"):
+        client.fetch_orbit(bad_id)

@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
+from datetime import timedelta
 from typing import Self
 
 from dotenv import load_dotenv
 
+from planetary_defense.domain.anomaly_rules import AlertThresholds
 from planetary_defense.domain.errors import ConfigError
 
 
@@ -79,3 +81,30 @@ class Settings:
         if not key:
             raise ConfigError("NASA_API_KEY is not set; add it to .env (see .env.example; DEMO_KEY works for a trial)")
         return key
+
+    def alert_thresholds(self) -> AlertThresholds:
+        """Anomaly-rule thresholds; each field can be overridden with ALERT_<FIELD> (e.g. ALERT_WATCH_LD=12)."""
+        overrides: dict[str, float] = {}
+        for f in fields(AlertThresholds):
+            name = f"ALERT_{f.name.upper()}"
+            raw = (self.env.get(name) or "").strip()
+            if raw:
+                try:
+                    overrides[f.name] = float(raw)
+                except ValueError:
+                    raise ConfigError(f"{name} must be a number, got {raw!r}") from None
+        try:
+            return AlertThresholds(**overrides)
+        except ValueError as exc:
+            raise ConfigError(f"Invalid alert thresholds: {exc}") from None
+
+    def orbit_cache_max_age(self) -> timedelta:
+        """How long a cached orbit is used before asking NASA again (ORBIT_CACHE_MAX_AGE_DAYS, default 30)."""
+        raw = (self.env.get("ORBIT_CACHE_MAX_AGE_DAYS") or "30").strip()
+        try:
+            days = int(raw)
+        except ValueError:
+            raise ConfigError(f"ORBIT_CACHE_MAX_AGE_DAYS must be a whole number, got {raw!r}") from None
+        if days < 0:
+            raise ConfigError(f"ORBIT_CACHE_MAX_AGE_DAYS must not be negative, got {days}")
+        return timedelta(days=days)

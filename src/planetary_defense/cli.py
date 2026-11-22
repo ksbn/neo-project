@@ -41,6 +41,7 @@ from datetime import date
 from enum import IntEnum
 
 from planetary_defense.application.ingest_feed import (
+    AlertRecorder,
     DryRunStore,
     IngestionRunRecorder,
     IngestService,
@@ -49,8 +50,9 @@ from planetary_defense.application.ingest_feed import (
     RunObserver,
     WindowFailed,
 )
-from planetary_defense.application.ports import AsteroidStore, FeedSource, RunLog
+from planetary_defense.application.ports import AlertStore, AsteroidStore, FeedSource, RunLog
 from planetary_defense.config import Settings
+from planetary_defense.domain.anomaly_rules import default_rules
 from planetary_defense.domain.errors import (
     ConfigError,
     FeedContractError,
@@ -62,7 +64,7 @@ from planetary_defense.domain.errors import (
 )
 from planetary_defense.infrastructure.db import connect
 from planetary_defense.infrastructure.nasa_client import NeoWsClient
-from planetary_defense.infrastructure.repository import AsteroidRepository, IngestionRunRepository
+from planetary_defense.infrastructure.repository import AlertRepository, AsteroidRepository, IngestionRunRepository
 
 __all__ = ["CLI_OUTCOMES", "ExitCode", "PipelineStats", "WindowFailed", "main", "outcome", "parse_args"]
 
@@ -104,6 +106,7 @@ def outcome(exc: NeoError) -> tuple[ExitCode, str]:
 FeedFactory = Callable[[Settings], AbstractContextManager[FeedSource]]
 StoreFactory = Callable[[Settings], AbstractContextManager[AsteroidStore]]
 RunLogFactory = Callable[[Settings], AbstractContextManager[RunLog]]
+AlertStoreFactory = Callable[[Settings], AbstractContextManager[AlertStore]]
 
 
 def open_nasa_feed(settings: Settings) -> NeoWsClient:
@@ -124,6 +127,13 @@ def open_postgres_run_log(settings: Settings) -> Iterator[IngestionRunRepository
     when a write on the data connection failed and was rolled back."""
     with connect(settings.db(), autocommit=True, application_name="neo-pipeline-runlog") as conn:
         yield IngestionRunRepository(conn)
+
+
+@contextmanager
+def open_postgres_alert_store(settings: Settings) -> Iterator[AlertRepository]:
+    """Default AlertStore: its own connection, so alerts never share a transaction with the data."""
+    with connect(settings.db(), application_name="neo-pipeline-alerts") as conn:
+        yield AlertRepository(conn)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -197,6 +207,7 @@ def main(
     open_feed: FeedFactory = open_nasa_feed,
     open_store: StoreFactory = open_postgres_store,
     open_run_log: RunLogFactory = open_postgres_run_log,
+    open_alert_store: AlertStoreFactory = open_postgres_alert_store,
 ) -> int:
     """Run the CLI. The keyword arguments are the seams tests use to inject fakes."""
     args = parse_args(argv)
@@ -205,12 +216,16 @@ def main(
     stats = PipelineStats()
     try:
         settings = settings or Settings.load()
+        rules = default_rules(settings.alert_thresholds())  # bad thresholds stop the run before any fetch
         # Open the store before any NASA call so a database outage doesn't waste API quota.
         store_cm = nullcontext(DryRunStore()) if args.dry_run else open_store(settings)
         # A dry run writes nothing, not even a run record.
         run_log_cm = nullcontext(None) if args.dry_run else open_run_log(settings)
-        with store_cm as store, run_log_cm as run_log, open_feed(settings) as feed:
+        alerts_cm = nullcontext(None) if args.dry_run else open_alert_store(settings)
+        with store_cm as store, run_log_cm as run_log, alerts_cm as alert_store, open_feed(settings) as feed:
             observers: list[RunObserver] = [LogObserver(logger, dry_run=args.dry_run)]
+            if alert_store is not None:
+                observers.append(AlertRecorder(rules, alert_store))
             if run_log is not None:
                 observers.append(IngestionRunRecorder(run_log))
             service = IngestService(feed, store, observers)

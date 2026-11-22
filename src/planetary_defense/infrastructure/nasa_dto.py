@@ -24,13 +24,13 @@ from datetime import date
 from decimal import Decimal
 from typing import Any, Self
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, ValidationError, model_validator
 
 from planetary_defense.domain import models as domain
-from planetary_defense.domain.errors import FeedContractError
-from planetary_defense.domain.models import Asteroid, FeedBatch, InvalidObject, Observation
+from planetary_defense.domain.errors import FeedContractError, OrbitUnavailable
+from planetary_defense.domain.models import Asteroid, FeedBatch, InvalidObject, Observation, OrbitalElements, OrbitData
 
-__all__ = ["parse_feed", "to_observation"]
+__all__ = ["parse_feed", "parse_orbit", "to_observation"]
 
 logger = logging.getLogger(__name__)
 
@@ -214,3 +214,91 @@ def parse_feed(payload: Mapping[str, Any]) -> FeedBatch:
         element_count=seen,
         feed_dates=frozenset(feed.near_earth_objects),
     )
+
+
+# --------------------------------------------------------------------------- #
+# /neo/{id}: orbital data
+# --------------------------------------------------------------------------- #
+
+
+class _OrbitClass(_IngestModel):
+    orbit_class_type: str | None = None
+
+
+class _OrbitalData(_IngestModel):
+    """``orbital_data`` of ``/neo/{id}``. NASA sends numbers as strings, often like ``".41"``.
+
+    Elements are optional here so a missing one is reported as "no usable orbit"
+    (:class:`OrbitUnavailable`), while a present-but-garbled one is a contract
+    break (:class:`FeedContractError`).
+    """
+
+    semi_major_axis: FiniteFloat | None = None
+    eccentricity: FiniteFloat | None = None
+    inclination: FiniteFloat | None = None
+    ascending_node_longitude: FiniteFloat | None = None
+    perihelion_argument: FiniteFloat | None = None
+    mean_anomaly: FiniteFloat | None = None
+    epoch_osculation: FiniteFloat | None = None
+    orbit_id: str | None = None
+    orbit_class: _OrbitClass | None = None
+    minimum_orbit_intersection: FiniteFloat | None = None
+
+
+class _NeoDetail(_IngestModel):
+    neo_reference_id: str = Field(min_length=1)
+    orbital_data: _OrbitalData | None = None
+
+
+def parse_orbit(payload: Mapping[str, Any]) -> OrbitData:
+    """Validate a raw ``/neo/{id}`` payload into the domain's :class:`OrbitData`.
+
+    Raises:
+        FeedContractError: The response doesn't have the documented shape.
+        OrbitUnavailable: NASA has no complete elliptical orbit for this asteroid.
+    """
+    try:
+        detail = _NeoDetail.model_validate(payload)
+    except ValidationError as exc:
+        raise FeedContractError(f"NeoWs /neo response did not match the expected format: {_summarize(exc)}") from exc
+
+    ref, od = detail.neo_reference_id, detail.orbital_data
+    if od is None:
+        raise OrbitUnavailable(f"NASA has no orbital elements for asteroid {ref}")
+    elements = {
+        "semi_major_axis_au": od.semi_major_axis,
+        "eccentricity": od.eccentricity,
+        "inclination_deg": od.inclination,
+        "ascending_node_deg": od.ascending_node_longitude,
+        "perihelion_argument_deg": od.perihelion_argument,
+        "mean_anomaly_deg": od.mean_anomaly,
+        "epoch_jd": od.epoch_osculation,
+    }
+    missing = [name for name, field in _NASA_FIELD.items() if elements[field] is None]
+    if missing:
+        raise OrbitUnavailable(f"NASA's orbit for asteroid {ref} lacks {', '.join(missing)}")
+
+    try:
+        orbital_elements = OrbitalElements(**{k: float(v) for k, v in elements.items() if v is not None})
+    except ValueError as exc:  # e.g. a hyperbolic orbit (eccentricity >= 1)
+        raise OrbitUnavailable(f"The orbit of asteroid {ref} can't be drawn: {exc}") from exc
+
+    return OrbitData(
+        neo_reference_id=ref,
+        elements=orbital_elements,
+        orbit_id=od.orbit_id,
+        orbit_class=od.orbit_class.orbit_class_type if od.orbit_class else None,
+        moid_au=od.minimum_orbit_intersection,
+    )
+
+
+# NASA's field name -> OrbitalElements field, for "lacks ..." messages in NASA's terms.
+_NASA_FIELD = {
+    "semi_major_axis": "semi_major_axis_au",
+    "eccentricity": "eccentricity",
+    "inclination": "inclination_deg",
+    "ascending_node_longitude": "ascending_node_deg",
+    "perihelion_argument": "perihelion_argument_deg",
+    "mean_anomaly": "mean_anomaly_deg",
+    "epoch_osculation": "epoch_jd",
+}
