@@ -2,14 +2,22 @@
 
 import logging
 from collections.abc import Sequence
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
 from conftest import make_feed, make_neo
-from domain import FeedBatch, Observation, UpsertResult, latest
+from domain import FeedBatch, IngestionRun, Observation, RunStatus, UpsertResult, latest
 from errors import NeoError, StorageError, UpstreamUnavailable
-from ingest import DryRunStore, IngestService, LogObserver, PipelineStats, WindowFailed, WindowReport
+from ingest import (
+    DryRunStore,
+    IngestionRunRecorder,
+    IngestService,
+    LogObserver,
+    PipelineStats,
+    WindowFailed,
+    WindowReport,
+)
 from models import parse_feed
 
 
@@ -41,7 +49,7 @@ class InMemoryStore:
         newest = latest(observations)
         inserted = sum(o.neo_reference_id not in self.rows for o in newest)
         self.rows.update({o.neo_reference_id: o for o in newest})
-        return UpsertResult(inserted=inserted, unchanged=len(newest) - inserted)
+        return UpsertResult(inserted=inserted, unchanged=len(newest) - inserted, new_approaches=len(observations))
 
     def count(self) -> int:
         return len(self.rows)
@@ -122,3 +130,66 @@ def test_log_observer_reports_data_quality_problems(caplog):
     assert "Skipped invalid asteroid 2" in caplog.text
     assert "no entry for 2026-11-02" in caplog.text
     assert "Done: 2 fetched" in caplog.text
+
+
+# --------------------------------------------------------------------------- #
+# IngestionRunRecorder
+# --------------------------------------------------------------------------- #
+
+
+class FakeRunLog:
+    def __init__(self, fail: bool = False) -> None:
+        self.runs: list[IngestionRun] = []
+        self.fail = fail
+
+    def record(self, run: IngestionRun) -> None:
+        if self.fail:
+            raise StorageError("connection lost")
+        self.runs.append(run)
+
+
+class TickingClock:
+    def __init__(self) -> None:
+        self.now = datetime(2026, 11, 22, 8, 0, tzinfo=UTC)
+
+    def __call__(self) -> datetime:
+        self.now += timedelta(seconds=30)
+        return self.now
+
+
+def run_with_recorder(feed: FakeFeed, end: date, log: FakeRunLog) -> None:
+    recorder = IngestionRunRecorder(log, clock=TickingClock())
+    IngestService(feed, InMemoryStore(), [recorder]).run(date(2026, 11, 1), end)
+
+
+def test_recorder_writes_a_success_with_totals():
+    log = FakeRunLog()
+    run_with_recorder(FakeFeed(), date(2026, 11, 8), log)
+
+    (run,) = log.runs
+    assert (run.status, run.windows_total, run.windows_done, run.inserted, run.new_approaches) == (RunStatus.SUCCESS, 2, 2, 8, 8)
+    assert (run.start_date, run.end_date) == (date(2026, 11, 1), date(2026, 11, 8))
+    assert run.finished_at - run.started_at == timedelta(seconds=30)
+    assert run.error_category is None and run.error_message is None
+
+
+def test_recorder_tells_partial_from_failed():
+    partial, failed = FakeRunLog(), FakeRunLog()
+    with pytest.raises(WindowFailed):
+        run_with_recorder(FakeFeed(fail_on=frozenset({date(2026, 11, 8)})), date(2026, 11, 8), partial)
+    with pytest.raises(WindowFailed):
+        run_with_recorder(FakeFeed(fail_on=frozenset({date(2026, 11, 1)})), date(2026, 11, 8), failed)
+
+    assert (partial.runs[0].status, partial.runs[0].windows_done) == (RunStatus.PARTIAL, 1)
+    assert (failed.runs[0].status, failed.runs[0].windows_done) == (RunStatus.FAILED, 0)
+    assert failed.runs[0].error_category == "UpstreamUnavailable"
+    assert failed.runs[0].error_message == "NASA is down"
+
+
+def test_recorder_failure_does_not_change_the_run(caplog):
+    """Recording is best effort: the data was saved, so the run still succeeds."""
+    stats = IngestService(FakeFeed(), InMemoryStore(), [IngestionRunRecorder(FakeRunLog(fail=True))]).run(
+        date(2026, 11, 1), date(2026, 11, 1)
+    )
+    assert stats.windows_done == 1
+    assert "Could not record the pipeline run" in caplog.text

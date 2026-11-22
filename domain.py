@@ -10,15 +10,20 @@ Write side (ingestion):
 * :class:`FeedBatch`, :class:`InvalidObject` and :class:`UpsertResult` are the values
   the ports (``ports.py``) exchange.
 
-Read side (dashboard): :class:`AsteroidSummary` and :class:`Overview`.
+Runs: :class:`IngestionRun` records what one pipeline run did; :class:`PipelineStatus`
+is what the dashboard needs to know about recent runs.
+
+Read side (dashboard): :class:`AsteroidSummary`, :class:`ApproachSummary`,
+:class:`Overview` and :class:`AsteroidView`.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
+from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
 
@@ -120,11 +125,12 @@ class FeedBatch:
 
 @dataclass(frozen=True)
 class UpsertResult:
-    """Row counts from one store write, per asteroid."""
+    """Row counts from one store write: per asteroid, plus history rows added."""
 
     inserted: int = 0
     updated: int = 0
     unchanged: int = 0
+    new_approaches: int = 0
 
     @property
     def total(self) -> int:
@@ -150,6 +156,47 @@ def date_windows(start: date, end: date, max_days: int) -> Iterator[tuple[date, 
 
 
 # --------------------------------------------------------------------------- #
+# Pipeline runs
+# --------------------------------------------------------------------------- #
+
+
+class RunStatus(StrEnum):
+    SUCCESS = "success"
+    PARTIAL = "partial"  # some windows were committed before a failure
+    FAILED = "failed"  # nothing was committed
+
+
+@dataclass(frozen=True)
+class IngestionRun:
+    """What one pipeline run did. ``error_category`` is the NeoError class name, if it failed."""
+
+    started_at: datetime
+    finished_at: datetime
+    start_date: date
+    end_date: date
+    status: RunStatus
+    windows_total: int = 0
+    windows_done: int = 0
+    fetched: int = 0
+    inserted: int = 0
+    updated: int = 0
+    unchanged: int = 0
+    invalid: int = 0
+    missing_dates: int = 0
+    new_approaches: int = 0
+    error_category: str | None = None
+    error_message: str | None = None
+
+
+@dataclass(frozen=True)
+class PipelineStatus:
+    """The latest run (whatever its outcome) and when data was last refreshed successfully."""
+
+    last_run: IngestionRun | None
+    last_success_at: datetime | None
+
+
+# --------------------------------------------------------------------------- #
 # Read side
 # --------------------------------------------------------------------------- #
 
@@ -168,12 +215,23 @@ class AsteroidSummary:
 
 
 @dataclass(frozen=True)
+class ApproachSummary:
+    """One recorded close approach of an asteroid."""
+
+    close_approach_date: date
+    orbiting_body: str
+    relative_velocity_km_s: float
+    miss_distance_km: float
+
+
+@dataclass(frozen=True)
 class Overview:
     """Totals over the whole data set, not just the rows that were loaded."""
 
     total: int
     hazardous: int
     latest_approach: date | None
+    approaches: int = 0  # close approaches recorded (history), across all asteroids
 
 
 @dataclass(frozen=True)
@@ -182,6 +240,9 @@ class AsteroidView:
 
     overview: Overview
     rows: list[AsteroidSummary]
+    # Only the stored view has run records and per-asteroid history; the live fallback doesn't.
+    status: PipelineStatus | None = None
+    history_available: bool = False
 
     @property
     def is_empty(self) -> bool:

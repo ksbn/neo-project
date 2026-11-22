@@ -18,7 +18,7 @@ from typing import Final
 
 from domain import AsteroidSummary, AsteroidView, Overview, latest
 from errors import NeoError
-from ports import AsteroidReader, FeedSource
+from ports import AsteroidReader, FeedSource, RunReader
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +27,19 @@ MAX_ROWS: Final = 5_000
 API_FALLBACK_DAYS: Final = 2
 
 
-def view_from_store(reader: AsteroidReader, limit: int = MAX_ROWS) -> AsteroidView:
-    """Totals over the whole table plus the newest ``limit`` rows."""
-    return AsteroidView(overview=reader.overview(), rows=reader.list_recent(limit))
+def view_from_store(reader: AsteroidReader, runs: RunReader, limit: int = MAX_ROWS) -> AsteroidView:
+    """Totals over the whole table, the newest ``limit`` rows and the pipeline's status.
+
+    The status is secondary: if only it fails, the asteroid data is still shown
+    (``status=None``) rather than falling back to the live API.
+    """
+    overview, rows = reader.overview(), reader.list_recent(limit)
+    try:
+        status = runs.pipeline_status()
+    except NeoError as exc:
+        logger.warning("Pipeline status unavailable: %s", exc)
+        status = None
+    return AsteroidView(overview=overview, rows=rows, status=status, history_available=True)
 
 
 def view_from_feed(feed: FeedSource, today: date, days: int = API_FALLBACK_DAYS) -> AsteroidView:
@@ -49,10 +59,12 @@ def view_from_feed(feed: FeedSource, today: date, days: int = API_FALLBACK_DAYS)
     ]
     rows.sort(key=lambda r: (r.close_approach_date is not None, r.close_approach_date or date.min), reverse=True)
     dates = [r.close_approach_date for r in rows if r.close_approach_date is not None]
+    passes = {(o.neo_reference_id, o.approach_date, o.approach.orbiting_body) for o in batch.observations if o.approach}
     overview = Overview(
         total=len(rows),
         hazardous=sum(r.is_potentially_hazardous for r in rows),
         latest_approach=max(dates, default=None),
+        approaches=len(passes),
     )
     return AsteroidView(overview=overview, rows=rows)
 

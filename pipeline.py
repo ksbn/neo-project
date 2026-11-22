@@ -42,7 +42,7 @@ from enum import IntEnum
 
 from client import NeoWsClient
 from config import Settings
-from database import AsteroidRepository, connect
+from database import AsteroidRepository, IngestionRunRepository, connect
 from errors import (
     ConfigError,
     FeedContractError,
@@ -52,8 +52,16 @@ from errors import (
     UpstreamError,
     UpstreamRequestError,
 )
-from ingest import DryRunStore, IngestService, LogObserver, PipelineStats, WindowFailed
-from ports import AsteroidStore, FeedSource
+from ingest import (
+    DryRunStore,
+    IngestionRunRecorder,
+    IngestService,
+    LogObserver,
+    PipelineStats,
+    RunObserver,
+    WindowFailed,
+)
+from ports import AsteroidStore, FeedSource, RunLog
 
 __all__ = ["CLI_OUTCOMES", "ExitCode", "PipelineStats", "WindowFailed", "main", "outcome", "parse_args"]
 
@@ -94,6 +102,7 @@ def outcome(exc: NeoError) -> tuple[ExitCode, str]:
 
 FeedFactory = Callable[[Settings], AbstractContextManager[FeedSource]]
 StoreFactory = Callable[[Settings], AbstractContextManager[AsteroidStore]]
+RunLogFactory = Callable[[Settings], AbstractContextManager[RunLog]]
 
 
 def open_nasa_feed(settings: Settings) -> NeoWsClient:
@@ -106,6 +115,14 @@ def open_postgres_store(settings: Settings) -> Iterator[AsteroidRepository]:
     """Default AsteroidStore: a repository on a fresh connection, closed afterwards."""
     with connect(settings.db()) as conn:
         yield AsteroidRepository(conn)
+
+
+@contextmanager
+def open_postgres_run_log(settings: Settings) -> Iterator[IngestionRunRepository]:
+    """Default RunLog: its own autocommit connection, so a run is recorded even
+    when a write on the data connection failed and was rolled back."""
+    with connect(settings.db(), autocommit=True, application_name="neo-pipeline-runlog") as conn:
+        yield IngestionRunRepository(conn)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -178,6 +195,7 @@ def main(
     settings: Settings | None = None,
     open_feed: FeedFactory = open_nasa_feed,
     open_store: StoreFactory = open_postgres_store,
+    open_run_log: RunLogFactory = open_postgres_run_log,
 ) -> int:
     """Run the CLI. The keyword arguments are the seams tests use to inject fakes."""
     args = parse_args(argv)
@@ -188,8 +206,13 @@ def main(
         settings = settings or Settings.load()
         # Open the store before any NASA call so a database outage doesn't waste API quota.
         store_cm = nullcontext(DryRunStore()) if args.dry_run else open_store(settings)
-        with store_cm as store, open_feed(settings) as feed:
-            service = IngestService(feed, store, observers=[LogObserver(logger, dry_run=args.dry_run)])
+        # A dry run writes nothing, not even a run record.
+        run_log_cm = nullcontext(None) if args.dry_run else open_run_log(settings)
+        with store_cm as store, run_log_cm as run_log, open_feed(settings) as feed:
+            observers: list[RunObserver] = [LogObserver(logger, dry_run=args.dry_run)]
+            if run_log is not None:
+                observers.append(IngestionRunRecorder(run_log))
+            service = IngestService(feed, store, observers)
             service.run(args.start_date, args.end_date, stats)
             if not args.dry_run:
                 _log_table_size(store)

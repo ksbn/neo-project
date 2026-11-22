@@ -156,12 +156,11 @@ dbmate applies only files not yet recorded in `schema_migrations`, oldest timest
 
 ## 5. How the data is stored
 
-### Current
-
-One row per asteroid. Only the **latest** close approach is kept; earlier approaches are overwritten.
+Three tables. `asteroids` is the **current state**: one row per asteroid with its newest close approach, which is what the dashboard lists. `close_approaches` is the **history**: every pass the pipeline has seen. `ingestion_runs` records **what each pipeline run did**, which the dashboard shows as "last run".
 
 ```mermaid
 erDiagram
+    ASTEROIDS ||--o{ CLOSE_APPROACHES : "has passes"
     ASTEROIDS {
         text neo_reference_id PK
         text name
@@ -171,48 +170,42 @@ erDiagram
         numeric estimated_diameter_max_km
         boolean is_potentially_hazardous
         boolean is_sentry_object
-        date close_approach_date "latest only"
-        numeric relative_velocity_km_s "latest only"
-        numeric miss_distance_km "latest only"
-        text orbiting_body "latest only"
+        date close_approach_date "newest pass"
+        numeric relative_velocity_km_s "newest pass"
+        numeric miss_distance_km "newest pass"
+        text orbiting_body "newest pass"
         timestamptz created_at
         timestamptz updated_at
     }
-```
-
-### Proposed
-
-Facts about the asteroid live in one table and every close approach is kept in another, so history is preserved. `INGESTION_RUNS` records the result of each pipeline run.
-
-```mermaid
-erDiagram
-    ASTEROIDS ||--o{ CLOSE_APPROACHES : has
-    ASTEROIDS {
-        text neo_reference_id PK
-        text name
-        numeric absolute_magnitude_h
-        numeric estimated_diameter_min_km
-        numeric estimated_diameter_max_km
-        boolean is_potentially_hazardous
-        boolean is_sentry_object
-        timestamptz updated_at
-    }
     CLOSE_APPROACHES {
-        text neo_reference_id FK
-        date close_approach_date
-        text orbiting_body
+        text neo_reference_id PK, FK
+        date close_approach_date PK
+        text orbiting_body PK
         numeric relative_velocity_km_s
         numeric miss_distance_km
+        timestamptz created_at
+        timestamptz updated_at
     }
     INGESTION_RUNS {
         bigint id PK
+        timestamptz started_at
+        timestamptz finished_at
         date start_date
         date end_date
-        int exit_code
+        text status "success, partial, failed"
         int inserted
         int updated
-        timestamptz finished_at
+        int new_approaches
+        text error_category "NeoError class name"
+        text error_message
     }
 ```
 
-`CLOSE_APPROACHES` would be unique on `(neo_reference_id, close_approach_date, orbiting_body)`, so re-runs stay safe.
+How one window is written (all in one transaction, `AsteroidRepository.save`):
+
+1. `domain.latest()` picks the newest observation per asteroid, which is upserted into `asteroids`. The SQL `WHERE` guard also refuses to replace a newer approach, so an old backfill or an overlapping run can't move it backwards.
+2. Every observation's approach is upserted into `close_approaches`, keyed by `(neo_reference_id, close_approach_date, orbiting_body)`. A new pass adds a row; a pass NASA revised updates its numbers; a re-run changes nothing.
+
+The `close_approaches` migration seeded the table from the approaches already in `asteroids`, so history starts with what was stored before it existed.
+
+`ingestion_runs` gets one row per run that started fetching, written by `ingest.IngestionRunRecorder` over its own autocommit connection, so a failed or partial run is recorded even after its data transaction rolled back. Runs that stop earlier (missing settings, database down) can't be recorded; the dashboard flags data older than 36 hours instead. Dry runs record nothing.

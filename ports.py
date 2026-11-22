@@ -12,7 +12,16 @@ from collections.abc import Sequence
 from datetime import date
 from typing import Protocol
 
-from domain import AsteroidSummary, FeedBatch, Observation, Overview, UpsertResult
+from domain import (
+    ApproachSummary,
+    AsteroidSummary,
+    FeedBatch,
+    IngestionRun,
+    Observation,
+    Overview,
+    PipelineStatus,
+    UpsertResult,
+)
 
 
 class FeedSource(Protocol):
@@ -27,7 +36,7 @@ class FeedSource(Protocol):
 
 
 class AsteroidStore(Protocol):
-    """Persists observations idempotently (write side)."""
+    """Persists observations idempotently (write side): the newest per asteroid, and every approach as history."""
 
     def save(self, observations: Sequence[Observation]) -> UpsertResult: ...
 
@@ -40,3 +49,17 @@ class AsteroidReader(Protocol):
     def overview(self) -> Overview: ...
 
     def list_recent(self, limit: int) -> list[AsteroidSummary]: ...
+
+    def approach_history(self, neo_reference_id: str, limit: int) -> list[ApproachSummary]: ...
+
+
+class RunLog(Protocol):
+    """Keeps a record of pipeline runs (write side)."""
+
+    def record(self, run: IngestionRun) -> None: ...
+
+
+class RunReader(Protocol):
+    """Answers "when did the pipeline last run, and did it work?" (read side)."""
+
+    def pipeline_status(self) -> PipelineStatus: ...
