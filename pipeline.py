@@ -15,10 +15,16 @@ Exit codes (see :class:`ExitCode`):
     0  success
     1  configuration error (e.g. missing .env settings)
     2  invalid command-line arguments
-    3  NASA API unavailable or returned unusable data (retry later)
+    3  NASA API unavailable or rate limited (retry later)
     4  database error
     5  partial run: some windows were committed before a later window failed
+    7  NASA answered in an unexpected format (schema change; retrying won't help)
     130 interrupted (Ctrl+C)
+
+An invalid or revoked NASA_API_KEY (HTTP 401/403) is a configuration error (1),
+not an outage (3). This module is the composition root: it reads settings once,
+builds the NASA client and the repository, hands them to
+:class:`ingest.IngestService`, and maps typed errors to exit codes.
 """
 
 from __future__ import annotations
@@ -26,155 +32,42 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from collections.abc import Sequence
-from contextlib import nullcontext
-from dataclasses import dataclass
-from datetime import date, timedelta
-from enum import IntEnum
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import AbstractContextManager, contextmanager, nullcontext
+from datetime import date
 
-import psycopg
-from dotenv import load_dotenv
-from pydantic import ValidationError
-
-from client import NasaApiError, NeoWsClient, date_chunks
+from client import NeoWsClient
+from config import Settings
 from database import AsteroidRepository, connect
-from models import parse_feed
+from errors import ExitCode, FeedContractError, NeoError, StorageError, UpstreamAuthError
+from ingest import IngestService, PipelineStats, WindowFailed
+from ports import AsteroidStore, FeedSource
+
+__all__ = ["ExitCode", "PipelineStats", "WindowFailed", "main", "parse_args"]
 
 logger = logging.getLogger("pipeline")
 
-
-class ExitCode(IntEnum):
-    OK = 0
-    CONFIG_ERROR = 1
-    USAGE_ERROR = 2
-    API_UNAVAILABLE = 3
-    DATABASE_ERROR = 4
-    PARTIAL = 5
-    INTERRUPTED = 130
+FeedFactory = Callable[[Settings], AbstractContextManager[FeedSource]]
+StoreFactory = Callable[[Settings], AbstractContextManager[AsteroidStore]]
 
 
-@dataclass
-class PipelineStats:
-    """Running totals across all fetched windows."""
-
-    windows_total: int = 0
-    windows_done: int = 0
-    fetched: int = 0
-    invalid: int = 0
-    unique: int = 0
-    inserted: int = 0
-    updated: int = 0
-    unchanged: int = 0
-    missing_dates: int = 0
+def open_nasa_feed(settings: Settings) -> NeoWsClient:
+    """Default FeedSource: the real NeoWs client with the batch retry profile."""
+    return NeoWsClient(settings.nasa_api_key())
 
 
-class WindowFailed(Exception):
-    """A single 7-day window failed; earlier windows may already be committed."""
-
-    def __init__(self, window_start: date, window_end: date, cause: Exception) -> None:
-        super().__init__(f"window {window_start}..{window_end} failed: {cause}")
-        self.window_start = window_start
-        self.window_end = window_end
-        self.cause = cause
-
-
-def _process_window(
-    client: NeoWsClient,
-    repo: AsteroidRepository | None,
-    window_start: date,
-    window_end: date,
-    stats: PipelineStats,
-) -> None:
-    """Fetch, validate and (unless ``repo`` is None) upsert one window."""
-    result = parse_feed(client.get_feed(window_start, window_end))
-    stats.fetched += result.element_count
-    stats.invalid += len(result.invalid)
-    stats.unique += len(result.records)
-
-    for bad in result.invalid:
-        logger.warning(
-            "Skipped invalid asteroid %s on %s: %s",
-            bad.neo_reference_id or "<unknown id>",
-            bad.feed_date,
-            bad.error,
-        )
-
-    requested = {window_start + timedelta(days=i) for i in range((window_end - window_start).days + 1)}
-    missing = sorted(requested - result.feed_dates)
-    if missing:
-        stats.missing_dates += len(missing)
-        logger.warning(
-            "NeoWs returned no entry for %s; data for those days may be incomplete",
-            ", ".join(d.isoformat() for d in missing),
-        )
-
-    if repo is None:
-        logger.info(
-            "%s..%s: %d objects, %d valid unique asteroids (not written: dry run)",
-            window_start, window_end, result.element_count, len(result.records),
-        )
-        return
-
-    upsert = repo.upsert_many(result.records)
-    stats.inserted += upsert.inserted
-    stats.updated += upsert.updated
-    stats.unchanged += upsert.unchanged
-    logger.info(
-        "%s..%s: %d objects -> %d inserted, %d updated, %d unchanged, %d invalid",
-        window_start, window_end, result.element_count,
-        upsert.inserted, upsert.updated, upsert.unchanged, len(result.invalid),
-    )
-
-
-def run(
-    start_date: date,
-    end_date: date,
-    *,
-    dry_run: bool = False,
-    stats: PipelineStats | None = None,
-) -> PipelineStats:
-    """Fetch, validate and store asteroids for the inclusive range ``start_date``..``end_date``.
-
-    Pass ``stats`` to observe progress even if the run fails part-way.
-
-    Raises:
-        ValueError: Invalid date range or missing configuration.
-        WindowFailed: A window failed (NASA API, response format or database error).
-        psycopg.Error: The database connection could not be opened.
-    """
-    if end_date < start_date:
-        raise ValueError(f"--end-date ({end_date}) is before --start-date ({start_date})")
-
-    stats = stats if stats is not None else PipelineStats()
-    windows = list(date_chunks(start_date, end_date))
-    stats.windows_total = len(windows)
-    logger.info(
-        "Starting pipeline for %s to %s (%d window%s)%s",
-        start_date, end_date, len(windows), "" if len(windows) == 1 else "s", " (dry run)" if dry_run else "",
-    )
-
-    # Connect before calling NASA so a database outage doesn't waste API quota.
-    with NeoWsClient() as client, (nullcontext(None) if dry_run else connect()) as conn:
-        repo = AsteroidRepository(conn) if conn is not None else None
-
-        for window_start, window_end in windows:
-            try:
-                _process_window(client, repo, window_start, window_end, stats)
-            except (NasaApiError, ValidationError, psycopg.Error) as exc:
-                raise WindowFailed(window_start, window_end, exc) from exc
-            stats.windows_done += 1
-
-        if repo is not None:
-            logger.info("Table now holds %d asteroids", repo.count())
-
-    return stats
+@contextmanager
+def open_postgres_store(settings: Settings) -> Iterator[AsteroidRepository]:
+    """Default AsteroidStore: a repository on a fresh connection, closed afterwards."""
+    with connect(settings.db()) as conn:
+        yield AsteroidRepository(conn)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Load NASA NeoWs asteroid data into PostgreSQL.",
-        epilog="Exit codes: 0 ok, 1 config error, 2 bad arguments, 3 NASA API unavailable, "
-        "4 database error, 5 partial run (re-run the same range to finish), 130 interrupted.",
+        epilog="Exit codes: 0 ok, 1 config error (incl. rejected API key), 2 bad arguments, 3 NASA API unavailable, "
+        "4 database error, 5 partial run (re-run the same range to finish), 7 NASA format changed, 130 interrupted.",
     )
     parser.add_argument(
         "--start-date", "--start",
@@ -210,20 +103,18 @@ def configure_logging(level: str) -> None:
     )
 
 
+_FAILURE_LABELS: dict[type[NeoError], str] = {
+    UpstreamAuthError: "NASA rejected the API key",
+    FeedContractError: "NeoWs response did not match the expected format",
+    StorageError: "Database error",
+}
+
+
 def _exit_code_for_failure(exc: WindowFailed, stats: PipelineStats, dry_run: bool) -> ExitCode:
     """Log a window failure and map it to an exit code."""
     cause = exc.cause
-    if isinstance(cause, NasaApiError):
-        logger.error("NASA API error on %s..%s: %s", exc.window_start, exc.window_end, cause)
-        code = ExitCode.API_UNAVAILABLE
-    elif isinstance(cause, ValidationError):
-        logger.error(
-            "NeoWs response for %s..%s did not match the expected format: %s", exc.window_start, exc.window_end, cause
-        )
-        code = ExitCode.API_UNAVAILABLE
-    else:
-        logger.error("Database error on %s..%s: %s", exc.window_start, exc.window_end, cause)
-        code = ExitCode.DATABASE_ERROR
+    label = next((text for kind, text in _FAILURE_LABELS.items() if isinstance(cause, kind)), "NASA API error")
+    logger.error("%s on %s..%s: %s", label, exc.window_start, exc.window_end, cause)
 
     if stats.windows_done and not dry_run:
         logger.error(
@@ -232,30 +123,39 @@ def _exit_code_for_failure(exc: WindowFailed, stats: PipelineStats, dry_run: boo
             stats.windows_done, stats.windows_total,
         )
         return ExitCode.PARTIAL
-    return code
+    return cause.exit_code
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    settings: Settings | None = None,
+    open_feed: FeedFactory = open_nasa_feed,
+    open_store: StoreFactory = open_postgres_store,
+) -> int:
+    """Run the CLI. The keyword arguments are the seams tests use to inject fakes."""
     args = parse_args(argv)
     configure_logging(args.log_level)
-    load_dotenv()
 
     stats = PipelineStats()
     try:
-        run(args.start_date, args.end_date, dry_run=args.dry_run, stats=stats)
+        settings = settings or Settings.load()
+        # Open the store before any NASA call so a database outage doesn't waste API quota.
+        with (
+            nullcontext(None) if args.dry_run else open_store(settings)
+        ) as store, open_feed(settings) as feed:
+            IngestService(feed, store).run(args.start_date, args.end_date, stats)
     except WindowFailed as exc:
         return _exit_code_for_failure(exc, stats, args.dry_run)
-    except ValueError as exc:
-        logger.error("Configuration error: %s", exc)
-        return ExitCode.CONFIG_ERROR
-    except psycopg.Error as exc:
-        logger.error("Database error: %s", exc)
-        return ExitCode.DATABASE_ERROR
+    except NeoError as exc:
+        logger.error("%s", exc)
+        return exc.exit_code
     except KeyboardInterrupt:
         logger.warning(
             "Interrupted after %d of %d windows; completed windows were committed", stats.windows_done, stats.windows_total
         )
         return ExitCode.INTERRUPTED
+    # Anything else is a bug: let it crash with a full traceback.
 
     logger.info(
         "Done: %d fetched, %d unique, %d inserted, %d updated, %d unchanged, %d invalid, %d missing days",

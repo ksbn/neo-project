@@ -1,24 +1,28 @@
 """PostgreSQL access layer for asteroid records.
 
-Connection settings come from ``DB_HOST``, ``DB_PORT``, ``DB_NAME``, ``DB_USER``
-and ``DB_PASSWORD`` (loaded from ``.env``). Writes go through
-:class:`AsteroidRepository`, whose upsert is idempotent: running it twice with
-the same data leaves the table unchanged.
+Connection settings arrive as a :class:`config.DbConfig`; this module never
+reads the environment. Reads and writes go through :class:`AsteroidRepository`,
+whose upsert is idempotent: running it twice with the same data leaves the
+table unchanged. Every ``psycopg.Error`` is translated to
+:class:`errors.StorageError` at this boundary.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import Sequence
-from dataclasses import dataclass, field
-from typing import Final, Self
+from dataclasses import dataclass
+from typing import Any, Final
 
 import psycopg
-from dotenv import load_dotenv
 from psycopg import sql
+from psycopg.rows import dict_row
 
-from models import AsteroidRecord
+from config import DbConfig
+from domain import AsteroidRecord
+from errors import StorageError
+
+__all__ = ["AsteroidRepository", "DbConfig", "SUMMARY_COLUMNS", "UpsertResult", "connect"]
 
 logger = logging.getLogger(__name__)
 
@@ -27,63 +31,49 @@ KEY_COLUMN: Final = "neo_reference_id"
 # Every column written by the pipeline; must match AsteroidRecord's fields.
 COLUMNS: Final = tuple(AsteroidRecord.model_fields)
 UPDATE_COLUMNS: Final = tuple(c for c in COLUMNS if c != KEY_COLUMN)
+# The columns the dashboard lists, newest close approach first.
+SUMMARY_COLUMNS: Final = (
+    "neo_reference_id",
+    "name",
+    "estimated_diameter_min_km",
+    "estimated_diameter_max_km",
+    "is_potentially_hazardous",
+    "close_approach_date",
+    "miss_distance_km",
+)
 
 
-@dataclass(frozen=True)
-class DbConfig:
-    """PostgreSQL connection settings."""
-
-    host: str
-    port: int
-    dbname: str
-    user: str
-    password: str = field(repr=False)  # keep the password out of logs/tracebacks
-
-    @classmethod
-    def from_env(cls) -> Self:
-        """Build a config from environment variables (``.env`` is loaded first).
-
-        Raises:
-            ValueError: If a required variable is missing or DB_PORT is not an integer.
-        """
-        load_dotenv()
-        required = ("DB_NAME", "DB_USER", "DB_PASSWORD")
-        missing = [name for name in required if not os.getenv(name)]
-        if missing:
-            raise ValueError(f"Missing database settings in environment/.env: {', '.join(missing)}")
-
-        port_raw = os.getenv("DB_PORT", "5432")
-        try:
-            port = int(port_raw)
-        except ValueError:
-            raise ValueError(f"DB_PORT must be an integer, got {port_raw!r}") from None
-
-        return cls(
-            host=os.getenv("DB_HOST", "localhost"),
-            port=port,
-            dbname=os.environ["DB_NAME"],
-            user=os.environ["DB_USER"],
-            password=os.environ["DB_PASSWORD"],
-        )
-
-
-def connect(config: DbConfig | None = None, *, connect_timeout: int = 10) -> psycopg.Connection:
+def connect(
+    config: DbConfig,
+    *,
+    connect_timeout: int = 10,
+    application_name: str = "neo-pipeline",
+    **kwargs: Any,
+) -> psycopg.Connection:
     """Open a new connection (autocommit off). Use it as a context manager.
 
     Raises:
-        psycopg.OperationalError: If the server cannot be reached or rejects the login.
+        StorageError: If the server cannot be reached or rejects the login.
     """
-    config = config or DbConfig.from_env()
     logger.debug("Connecting to %s", config)
-    return psycopg.connect(
-        host=config.host,
-        port=config.port,
-        dbname=config.dbname,
-        user=config.user,
-        password=config.password,
-        connect_timeout=connect_timeout,
-        application_name="neo-pipeline",
-    )
+    try:
+        return psycopg.connect(
+            host=config.host,
+            port=config.port,
+            dbname=config.dbname,
+            user=config.user,
+            password=config.password,
+            connect_timeout=connect_timeout,
+            application_name=application_name,
+            **kwargs,
+        )
+    except psycopg.Error as exc:
+        raise StorageError(f"Could not connect to PostgreSQL at {config.host}:{config.port}: {exc}") from exc
+
+
+def _storage_error(action: str, exc: psycopg.Error) -> StorageError:
+    code = f" [SQLSTATE {exc.sqlstate}]" if exc.sqlstate else ""
+    return StorageError(f"{action} failed{code}: {exc}")
 
 
 def _build_upsert_sql() -> sql.Composed:
@@ -156,6 +146,9 @@ class AsteroidRepository:
 
         All records are written in a single transaction: either every record
         is applied or none are.
+
+        Raises:
+            StorageError: The statement failed; the transaction was rolled back.
         """
         if not records:
             return UpsertResult()
@@ -163,24 +156,50 @@ class AsteroidRepository:
         params = [record.model_dump() for record in records]
         inserted = updated = 0
 
-        with self._conn.transaction(), self._conn.cursor() as cur:
-            cur.executemany(UPSERT_SQL, params, returning=True)
-            # executemany(returning=True) exposes one result set per record.
-            while True:
-                row = cur.fetchone()
-                if row is not None:
-                    if row[0]:
-                        inserted += 1
-                    else:
-                        updated += 1
-                if not cur.nextset():
-                    break
+        try:
+            with self._conn.transaction(), self._conn.cursor() as cur:
+                cur.executemany(UPSERT_SQL, params, returning=True)
+                # executemany(returning=True) exposes one result set per record.
+                while True:
+                    row = cur.fetchone()
+                    if row is not None:
+                        if row[0]:
+                            inserted += 1
+                        else:
+                            updated += 1
+                    if not cur.nextset():
+                        break
+        except psycopg.Error as exc:
+            raise _storage_error("Upsert", exc) from exc
 
         return UpsertResult(inserted=inserted, updated=updated, unchanged=len(records) - inserted - updated)
 
     def count(self) -> int:
         """Total number of asteroids stored."""
-        with self._conn.cursor() as cur:
-            cur.execute(sql.SQL("SELECT COUNT(*) FROM {}").format(sql.Identifier(TABLE)))
-            row = cur.fetchone()
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute(sql.SQL("SELECT COUNT(*) FROM {}").format(sql.Identifier(TABLE)))
+                row = cur.fetchone()
+        except psycopg.Error as exc:
+            raise _storage_error("Count", exc) from exc
         return int(row[0]) if row else 0
+
+    def list_recent(self, limit: int = 5_000) -> list[dict[str, Any]]:
+        """The dashboard view: :data:`SUMMARY_COLUMNS`, newest close approach first, at most ``limit`` rows."""
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+        query = sql.SQL(
+            "SELECT {cols} FROM {table} "
+            "ORDER BY close_approach_date DESC NULLS LAST, {key} "
+            "LIMIT %s"
+        ).format(
+            cols=sql.SQL(", ").join(map(sql.Identifier, SUMMARY_COLUMNS)),
+            table=sql.Identifier(TABLE),
+            key=sql.Identifier(KEY_COLUMN),
+        )
+        try:
+            with self._conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(query, (limit,))
+                return cur.fetchall()
+        except psycopg.Error as exc:
+            raise _storage_error("Listing asteroids", exc) from exc

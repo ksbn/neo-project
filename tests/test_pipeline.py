@@ -1,38 +1,44 @@
 """End-to-end orchestration (pipeline.py): argument parsing and exit codes.
 
 NASA is simulated with ``responses``; database writes go to the rolled-back
-test connection from conftest.py.
+test connection from conftest.py. Collaborators are injected through
+``main(settings=..., open_feed=..., open_store=...)``; nothing is monkeypatched.
 """
 
-import functools
 import logging
 from contextlib import nullcontext
 from datetime import date
 
-import psycopg
 import pytest
 import responses
 
-import pipeline
 from client import BASE_URL, NeoWsClient
+from config import Settings
 from conftest import make_feed, make_neo
 from database import AsteroidRepository
 from pipeline import ExitCode, main, parse_args
 
 FEED = f"{BASE_URL}/feed"
+ENV = {"NASA_API_KEY": "test-key", "DB_HOST": "127.0.0.1", "DB_NAME": "x", "DB_USER": "x", "DB_PASSWORD": "x"}
 
 
-@pytest.fixture(autouse=True)
-def fast_client(monkeypatch):
-    """Use a fixed fake key and no retry backoff inside the pipeline."""
-    monkeypatch.setattr(pipeline, "NeoWsClient", functools.partial(NeoWsClient, api_key="test-key", backoff_factor=0))
+def fast_feed(settings: Settings) -> NeoWsClient:
+    """The real client with no retry backoff."""
+    return NeoWsClient(settings.nasa_api_key(), backoff_factor=0)
+
+
+def no_store(settings: Settings):
+    raise AssertionError("this test must not open the database")
+
+
+def run(argv, *, env=ENV, open_feed=fast_feed, open_store=no_store) -> int:
+    return main(argv, settings=Settings(env), open_feed=open_feed, open_store=open_store)
 
 
 @pytest.fixture
-def test_db(monkeypatch, conn):
-    """Point the pipeline at the rolled-back test connection instead of the real database."""
-    monkeypatch.setattr(pipeline, "connect", lambda: nullcontext(conn))
-    return conn
+def test_db(conn):
+    """A store factory bound to the rolled-back test connection."""
+    return lambda settings: nullcontext(AsteroidRepository(conn))
 
 
 def week_feed(start: date, ref_prefix: str) -> dict:
@@ -77,8 +83,8 @@ def test_bad_arguments_exit_2(argv):
 def test_success_writes_records(test_db):
     responses.get(FEED, json=week_feed(date(2026, 11, 1), "a"))
 
-    assert main(["--start", "2026-11-01", "--end", "2026-11-07"]) == ExitCode.OK
-    assert AsteroidRepository(test_db).count() == 7
+    assert run(["--start", "2026-11-01", "--end", "2026-11-07"], open_store=test_db) == ExitCode.OK
+    assert count(test_db) == 7
 
 
 @responses.activate
@@ -86,21 +92,28 @@ def test_rerun_is_idempotent(test_db):
     responses.get(FEED, json=week_feed(date(2026, 11, 1), "a"))
     argv = ["--start", "2026-11-01", "--end", "2026-11-07"]
 
-    assert main(argv) == main(argv) == ExitCode.OK
-    assert AsteroidRepository(test_db).count() == 7
+    assert run(argv, open_store=test_db) == run(argv, open_store=test_db) == ExitCode.OK
+    assert count(test_db) == 7
 
 
 @responses.activate
 def test_nasa_down_exits_3(test_db):
     responses.get(FEED, status=503)
-    assert main(["--start", "2026-11-01"]) == ExitCode.API_UNAVAILABLE
-    assert AsteroidRepository(test_db).count() == 0
+    assert run(["--start", "2026-11-01"], open_store=test_db) == ExitCode.API_UNAVAILABLE
+    assert count(test_db) == 0
 
 
 @responses.activate
-def test_malformed_envelope_exits_3():
+def test_rejected_api_key_is_a_config_error_not_an_outage(caplog):
+    responses.get(FEED, status=403, json={"error": {"code": "API_KEY_INVALID", "message": "An invalid api_key was supplied."}})
+    assert run(["--start", "2026-11-01", "--dry-run"]) == ExitCode.CONFIG_ERROR
+    assert "NASA rejected the API key" in caplog.text
+
+
+@responses.activate
+def test_malformed_envelope_exits_7():
     responses.get(FEED, json={"unexpected": True})
-    assert main(["--start", "2026-11-01", "--dry-run"]) == ExitCode.API_UNAVAILABLE
+    assert run(["--start", "2026-11-01", "--dry-run"]) == ExitCode.CONTRACT_ERROR
 
 
 @responses.activate
@@ -108,28 +121,36 @@ def test_failure_after_committed_window_exits_5_and_keeps_progress(test_db, capl
     responses.get(FEED, json=week_feed(date(2026, 11, 1), "a"))  # window 1 succeeds
     responses.get(FEED, status=503)  # window 2 fails on every retry
 
-    code = main(["--start", "2026-11-01", "--end", "2026-11-10"])
+    code = run(["--start", "2026-11-01", "--end", "2026-11-10"], open_store=test_db)
 
     assert code == ExitCode.PARTIAL
-    assert AsteroidRepository(test_db).count() == 7
+    assert count(test_db) == 7
     assert "1 of 2 windows were committed" in caplog.text
     assert "2026-11-08..2026-11-10" in caplog.text
 
 
-def test_database_unreachable_exits_4(monkeypatch):
-    def refuse():
-        raise psycopg.OperationalError("connection refused")
-
-    monkeypatch.setattr(pipeline, "connect", refuse)
-    assert main(["--start", "2026-11-01"]) == ExitCode.DATABASE_ERROR
+def test_database_unreachable_exits_4():
+    # The real store factory against a port nothing listens on.
+    assert main(["--start", "2026-11-01"], settings=Settings({**ENV, "DB_PORT": "1"})) == ExitCode.DATABASE_ERROR
 
 
-def test_missing_db_settings_exit_1(monkeypatch):
-    def missing():
-        raise ValueError("Missing database settings in environment/.env: DB_PASSWORD")
+def test_missing_db_settings_exit_1(caplog):
+    env = {k: v for k, v in ENV.items() if k != "DB_PASSWORD"}
+    assert main(["--start", "2026-11-01"], settings=Settings(env)) == ExitCode.CONFIG_ERROR
+    assert "DB_PASSWORD" in caplog.text
 
-    monkeypatch.setattr(pipeline, "connect", missing)
-    assert main(["--start", "2026-11-01"]) == ExitCode.CONFIG_ERROR
+
+def test_missing_nasa_key_exits_1_even_for_a_dry_run():
+    assert run(["--start", "2026-11-01", "--dry-run"], env={}) == ExitCode.CONFIG_ERROR
+
+
+def test_programmer_errors_are_not_swallowed():
+    class BrokenFeed:
+        def fetch_records(self, start, end):
+            raise KeyError("bug")
+
+    with pytest.raises(KeyError):
+        run(["--start", "2026-11-01", "--dry-run"], open_feed=lambda settings: nullcontext(BrokenFeed()))
 
 
 @responses.activate
@@ -137,7 +158,12 @@ def test_missing_day_in_response_is_warned(caplog):
     responses.get(FEED, json=make_feed({"2026-11-01": [make_neo("1", "2026-11-01")]}))
 
     with caplog.at_level(logging.WARNING):
-        code = main(["--start", "2026-11-01", "--end", "2026-11-02", "--dry-run"])
+        code = run(["--start", "2026-11-01", "--end", "2026-11-02", "--dry-run"])
 
     assert code == ExitCode.OK
     assert "no entry for 2026-11-02" in caplog.text
+
+
+def count(store_factory) -> int:
+    with store_factory(None) as store:
+        return store.count()

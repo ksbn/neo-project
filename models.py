@@ -4,8 +4,12 @@ Two layers of models:
 
 * **Raw models** (``NearEarthObject`` and its children) mirror the JSON returned
   by ``/feed``. Numeric strings such as ``"12.345"`` are coerced to ``Decimal``.
-* **``AsteroidRecord``** is the flattened, validated row that maps 1:1 onto the
-  ``asteroids`` table defined in ``db/migrations``.
+* :func:`to_record` maps them onto the domain :class:`domain.AsteroidRecord`,
+  which maps 1:1 onto the ``asteroids`` table defined in ``db/migrations``.
+
+This module is the anti-corruption layer for NASA's payload: nothing outside it
+knows the raw JSON shape, and a malformed envelope surfaces as
+:class:`errors.FeedContractError` rather than a pydantic exception.
 
 ``parse_feed`` validates each asteroid independently, so one malformed object
 is reported and skipped instead of failing the whole batch.
@@ -21,6 +25,11 @@ from decimal import Decimal
 from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+
+from domain import AsteroidRecord
+from errors import FeedContractError
+
+__all__ = ["AsteroidRecord", "InvalidObject", "ParseResult", "parse_feed", "to_record"]
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +52,8 @@ MISS_DISTANCE_KM_LIMIT = _numeric_limit(20, 3)  # miss_distance_km      NUMERIC(
 MAGNITUDE_LIMIT = _numeric_limit(6, 3)  # absolute_magnitude_h          NUMERIC(6, 3)
 
 
-class _NasaModel(BaseModel):
-    """Base model: ignore fields we don't use, strip strings, immutable instances."""
+class _IngestModel(BaseModel):
+    """Base for raw NASA DTOs only: ignore fields we don't use, strip strings, immutable instances."""
 
     model_config = ConfigDict(extra="ignore", frozen=True, str_strip_whitespace=True)
 
@@ -54,7 +63,7 @@ class _NasaModel(BaseModel):
 # --------------------------------------------------------------------------- #
 
 
-class DiameterRange(_NasaModel):
+class DiameterRange(_IngestModel):
     """Min/max estimated diameter in a single unit."""
 
     estimated_diameter_min: Decimal = Field(ge=0, lt=DIAMETER_KM_LIMIT)
@@ -67,21 +76,21 @@ class DiameterRange(_NasaModel):
         return self
 
 
-class EstimatedDiameter(_NasaModel):
+class EstimatedDiameter(_IngestModel):
     """Diameter estimates per unit; only kilometers are stored."""
 
     kilometers: DiameterRange | None = None
 
 
-class RelativeVelocity(_NasaModel):
+class RelativeVelocity(_IngestModel):
     kilometers_per_second: Decimal = Field(ge=0, lt=VELOCITY_KM_S_LIMIT)
 
 
-class MissDistance(_NasaModel):
+class MissDistance(_IngestModel):
     kilometers: Decimal = Field(ge=0, lt=MISS_DISTANCE_KM_LIMIT)
 
 
-class CloseApproach(_NasaModel):
+class CloseApproach(_IngestModel):
     """One entry of ``close_approach_data``."""
 
     close_approach_date: date
@@ -90,7 +99,7 @@ class CloseApproach(_NasaModel):
     orbiting_body: str = Field(min_length=1)
 
 
-class NearEarthObject(_NasaModel):
+class NearEarthObject(_IngestModel):
     """A single asteroid as returned inside ``near_earth_objects``."""
 
     neo_reference_id: str = Field(min_length=1)
@@ -113,7 +122,7 @@ class NearEarthObject(_NasaModel):
         return min(self.close_approach_data, key=lambda a: abs((a.close_approach_date - day).days))
 
 
-class FeedResponse(_NasaModel):
+class FeedResponse(_IngestModel):
     """Envelope of the ``/feed`` response.
 
     Asteroids are kept as raw values here and validated one by one in
@@ -125,45 +134,28 @@ class FeedResponse(_NasaModel):
 
 
 # --------------------------------------------------------------------------- #
-# Database-ready record
+# Mapping to the domain record
 # --------------------------------------------------------------------------- #
 
 
-class AsteroidRecord(_NasaModel):
-    """Flattened asteroid row matching the ``asteroids`` table columns."""
-
-    neo_reference_id: str
-    name: str
-    nasa_jpl_url: str | None
-    absolute_magnitude_h: Decimal | None
-    estimated_diameter_min_km: Decimal | None
-    estimated_diameter_max_km: Decimal | None
-    is_potentially_hazardous: bool
-    is_sentry_object: bool
-    close_approach_date: date | None
-    relative_velocity_km_s: Decimal | None
-    miss_distance_km: Decimal | None
-    orbiting_body: str | None
-
-    @classmethod
-    def from_neo(cls, neo: NearEarthObject, feed_date: date) -> Self:
-        """Flatten a validated NEO, using its close approach for ``feed_date``."""
-        km = neo.estimated_diameter.kilometers if neo.estimated_diameter else None
-        approach = neo.approach_nearest(feed_date)
-        return cls(
-            neo_reference_id=neo.neo_reference_id,
-            name=neo.name,
-            nasa_jpl_url=neo.nasa_jpl_url,
-            absolute_magnitude_h=neo.absolute_magnitude_h,
-            estimated_diameter_min_km=km.estimated_diameter_min if km else None,
-            estimated_diameter_max_km=km.estimated_diameter_max if km else None,
-            is_potentially_hazardous=neo.is_potentially_hazardous_asteroid,
-            is_sentry_object=neo.is_sentry_object,
-            close_approach_date=approach.close_approach_date if approach else None,
-            relative_velocity_km_s=approach.relative_velocity.kilometers_per_second if approach else None,
-            miss_distance_km=approach.miss_distance.kilometers if approach else None,
-            orbiting_body=approach.orbiting_body if approach else None,
-        )
+def to_record(neo: NearEarthObject, feed_date: date) -> AsteroidRecord:
+    """Flatten a validated NEO, using its close approach for ``feed_date``."""
+    km = neo.estimated_diameter.kilometers if neo.estimated_diameter else None
+    approach = neo.approach_nearest(feed_date)
+    return AsteroidRecord(
+        neo_reference_id=neo.neo_reference_id,
+        name=neo.name,
+        nasa_jpl_url=neo.nasa_jpl_url,
+        absolute_magnitude_h=neo.absolute_magnitude_h,
+        estimated_diameter_min_km=km.estimated_diameter_min if km else None,
+        estimated_diameter_max_km=km.estimated_diameter_max if km else None,
+        is_potentially_hazardous=neo.is_potentially_hazardous_asteroid,
+        is_sentry_object=neo.is_sentry_object,
+        close_approach_date=approach.close_approach_date if approach else None,
+        relative_velocity_km_s=approach.relative_velocity.kilometers_per_second if approach else None,
+        miss_distance_km=approach.miss_distance.kilometers if approach else None,
+        orbiting_body=approach.orbiting_body if approach else None,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -211,9 +203,12 @@ def parse_feed(payload: Mapping[str, Any]) -> ParseResult:
     one-row-per-asteroid table design).
 
     Raises:
-        ValidationError: If the response envelope itself is malformed.
+        FeedContractError: If the response envelope itself is malformed.
     """
-    feed = FeedResponse.model_validate(payload)
+    try:
+        feed = FeedResponse.model_validate(payload)
+    except ValidationError as exc:
+        raise FeedContractError(f"NeoWs /feed response did not match the expected format: {_summarize(exc)}") from exc
 
     latest: dict[str, AsteroidRecord] = {}
     invalid: list[InvalidObject] = []
@@ -229,7 +224,7 @@ def parse_feed(payload: Mapping[str, Any]) -> ParseResult:
                 invalid.append(InvalidObject(feed_date, str(ref) if ref is not None else None, _summarize(exc)))
                 continue
 
-            record = AsteroidRecord.from_neo(neo, feed_date)
+            record = to_record(neo, feed_date)
             current = latest.get(record.neo_reference_id)
             if current is None or _is_newer(record, current):
                 latest[record.neo_reference_id] = record

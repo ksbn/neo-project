@@ -19,7 +19,9 @@ from typing import Any
 import psycopg
 import pytest
 
-from database import DbConfig
+from config import DbConfig
+from database import connect
+from errors import ConfigError, StorageError
 
 ROOT = Path(__file__).resolve().parent.parent
 MIGRATIONS_DIR = ROOT / "db" / "migrations"
@@ -80,20 +82,13 @@ def migration_up_sql() -> list[str]:
     return sections
 
 
-def _connect(cfg: DbConfig, **kwargs: Any) -> psycopg.Connection:
-    return psycopg.connect(
-        host=cfg.host, port=cfg.port, dbname=cfg.dbname, user=cfg.user, password=cfg.password,
-        connect_timeout=3, **kwargs,
-    )
-
-
 @pytest.fixture(scope="session")
 def db_schema() -> Iterator[tuple[DbConfig, str]]:
     """A throwaway schema with all migrations applied; dropped after the session."""
     try:
         cfg = DbConfig.from_env()
-        admin = _connect(cfg, autocommit=True)
-    except (ValueError, psycopg.OperationalError) as exc:
+        admin = connect(cfg, connect_timeout=3, autocommit=True)
+    except (ConfigError, StorageError) as exc:
         pytest.skip(f"PostgreSQL not available (start it with `docker compose up -d`): {exc}")
 
     name = f"test_{uuid.uuid4().hex[:8]}"
@@ -116,6 +111,6 @@ def conn(db_schema: tuple[DbConfig, str]) -> Iterator[psycopg.Connection]:
     outer transaction, so even its "commits" are undone.
     """
     cfg, name = db_schema
-    with _connect(cfg, options=f"-c search_path={name}") as c:
+    with connect(cfg, connect_timeout=3, options=f"-c search_path={name}") as c:
         with c.transaction(force_rollback=True):
             yield c

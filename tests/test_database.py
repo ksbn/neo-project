@@ -6,11 +6,15 @@ throwaway schema built from db/migrations, so these never touch real data.
 
 from decimal import Decimal
 
+from datetime import date
+
 import pytest
 
 import models
+from config import DbConfig
 from conftest import make_feed, make_neo
-from database import AsteroidRepository, UpsertResult
+from database import SUMMARY_COLUMNS, AsteroidRepository, UpsertResult, connect
+from errors import StorageError
 from models import parse_feed
 
 
@@ -94,3 +98,29 @@ def test_model_limits_match_column_types(conn, column, limit):
         (column,),
     ).fetchone()
     assert limit == Decimal(10) ** (precision - scale) - Decimal("0.5") * Decimal(10) ** -scale
+
+
+def test_list_recent_returns_newest_first_and_respects_limit(conn):
+    repo = AsteroidRepository(conn)
+    repo.upsert_many(records(make_neo("old", "2026-11-01"), day="2026-11-01"))
+    repo.upsert_many(records(make_neo("new", "2026-11-12"), day="2026-11-12"))
+    repo.upsert_many(records(make_neo("mid", "2026-11-05"), day="2026-11-05"))
+
+    rows = repo.list_recent()
+    assert [r["neo_reference_id"] for r in rows] == ["new", "mid", "old"]
+    assert tuple(rows[0]) == SUMMARY_COLUMNS
+    assert rows[0]["close_approach_date"] == date(2026, 11, 12)
+    assert [r["neo_reference_id"] for r in repo.list_recent(limit=1)] == ["new"]
+
+
+def test_driver_errors_become_storage_errors(conn):
+    conn.execute("DROP TABLE asteroids")  # rolled back with the test transaction
+    with pytest.raises(StorageError, match="SQLSTATE 42P01") as exc:
+        AsteroidRepository(conn).count()
+    assert "host" not in exc.value.user_message  # driver details stay out of the UI
+
+
+def test_unreachable_server_is_a_storage_error():
+    cfg = DbConfig(host="127.0.0.1", port=1, dbname="x", user="x", password="secret")
+    with pytest.raises(StorageError, match="Could not connect to PostgreSQL at 127.0.0.1:1"):
+        connect(cfg, connect_timeout=1)
