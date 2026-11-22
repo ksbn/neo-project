@@ -8,6 +8,7 @@ import { ApproachMap } from "./chart.js";
 import { DetailDrawer } from "./detail.js";
 import { $, $$, LOCALE, SEVERITIES, badge, clear, debounce, el, ld, metres, na, relativeDays, svg, timeAgo } from "./dom.js";
 import { WatchForm } from "./form.js";
+import { Viewport } from "./viewport.js";
 
 const PAGE = 25;
 const SUMMARY_REFRESH_MS = 60_000;
@@ -28,7 +29,7 @@ const COLUMNS = [
 ];
 
 const state = { filters: { ...DEFAULT_FILTERS }, offset: 0, items: [], total: 0, cursor: -1, hot: null,
-                compare: new Map(), listCtl: null, chartCtl: null };
+                compare: new Map(), listCtl: null, chartCtl: null, track: null };
 
 // ------------------------------------------------------------------ toasts and API status
 
@@ -66,12 +67,14 @@ function readUrl() {
   }
   state.filters = f;
   state.offset = Math.max(0, Number(p.get("offset")) || 0);
+  state.track = /^[0-9]{1,20}$/.test(p.get("track") ?? "") ? p.get("track") : null;
 }
 
 function writeUrl() {
   const p = new URLSearchParams();
   for (const [k, v] of Object.entries(state.filters)) if (v !== null && v !== "" && v !== DEFAULT_FILTERS[k]) p.set(k, v);
   if (state.offset) p.set("offset", state.offset);
+  if (state.track) p.set("track", state.track);
   const url = `${location.pathname}${p.size ? `?${p}` : ""}`;
   if (url !== `${location.pathname}${location.search}`) history.pushState(null, "", url);
 }
@@ -108,6 +111,7 @@ async function loadSummary() {
 }
 
 function renderSummary(s) {
+  if (!viewport.id) viewport.track(state.track ?? s.closest_approach?.neo_reference_id);
   const counts = s.alert_counts, alerted = SEVERITIES.reduce((n, k) => n + counts[k], 0);
   const worst = [...SEVERITIES].reverse().find((k) => counts[k] > 0) ?? null;
   const days = s.approaches_per_day, peak = Math.max(1, ...days.map((d) => d.count));
@@ -140,7 +144,7 @@ function renderSummary(s) {
     el("div", { class: "kpi" }, el("h3", {}, "Closest recent pass"),
       s.closest_approach
         ? [el("div", { class: "big" }, ld(s.closest_approach.approach.miss_distance_ld)),
-           el("div", { class: "sub" }, el("button", { class: "kpi-link", type: "button", onclick: () => drawer.open(s.closest_approach.neo_reference_id) },
+           el("div", { class: "sub" }, el("button", { class: "kpi-link", type: "button", onclick: () => viewport.track(s.closest_approach.neo_reference_id) },
              s.closest_approach.name), ` · ${s.closest_approach.approach.date}`)]
         : [el("div", { class: "big" }, na("—")), el("div", { class: "sub" }, "No passes stored yet")]),
     el("div", { class: "kpi" }, el("h3", {}, "Approaches · 14 days"),
@@ -167,6 +171,7 @@ async function loadObjects() {
     state.items = data.items;
     state.total = data.pagination.total;
     state.pagination = data.pagination;
+    if (!viewport.id && !state.track && data.items.length) setTimeout(() => viewport.id || viewport.track(data.items[0].neo_reference_id), 1500);
     if (state.cursor >= state.items.length) state.cursor = state.items.length - 1;
     renderTable();
     apiStatus(true, "API online");
@@ -220,7 +225,7 @@ function renderTable() {
     const row = el("tr", {
       class: [i === state.cursor && "cursor", o.neo_reference_id === state.hot && "hot", state.compare.has(o.neo_reference_id) && "compared"],
       dataset: { id: o.neo_reference_id, index: i }, tabindex: -1,
-      onclick: () => { state.cursor = i; drawer.open(o.neo_reference_id); },
+      onclick: () => { state.cursor = i; viewport.track(o.neo_reference_id); drawer.open(o.neo_reference_id); },
       onpointerenter: () => highlight(o.neo_reference_id), onpointerleave: () => highlight(null),
     },
       el("td", {}, o.watched ? el("span", { class: "star", title: "On the watchlist" }, "★") : ""),
@@ -265,7 +270,10 @@ function moveCursor(delta) {
   const row = $(`#table tbody tr[data-index="${state.cursor}"]`);
   row?.scrollIntoView({ block: "nearest" });
   highlight(state.items[state.cursor]?.neo_reference_id ?? null);
+  followCursor();
 }
+
+const followCursor = debounce(() => viewport.track(state.items[state.cursor]?.neo_reference_id), 600);
 
 // ------------------------------------------------------------------ filters UI
 
@@ -327,7 +335,8 @@ async function loadWatchlist() {
       return;
     }
     clear(box, data.items.map((w) => el("div", { class: "wl-item", tabindex: 0, role: "button",
-      onclick: () => drawer.open(w.neo_reference_id), onkeydown: (e) => e.key === "Enter" && drawer.open(w.neo_reference_id) },
+      onclick: () => viewport.track(w.neo_reference_id),
+      onkeydown: (e) => e.key === "Enter" && viewport.track(w.neo_reference_id) },
       el("span", {}, w.name), el("span", { class: `prio prio-${w.priority}` }, w.priority),
       el("div", { class: "meta" }, w.alert_threshold_ld !== null ? `flag ≤ ${w.alert_threshold_ld} LD · ` : "",
         `added ${timeAgo(w.created_at)} `, w.tags.map((t) => el("span", { class: "tag" }, t))))),
@@ -395,6 +404,7 @@ function onKey(e) {
     Enter: () => item && drawer.open(item.neo_reference_id),
     w: () => (drawer.isOpen ? null : item ? form.open({ neoId: item.neo_reference_id, name: item.name }) : form.open()),
     x: () => toggleCompare(item),
+    v: () => { if (item) { viewport.track(item.neo_reference_id); $(".stage").scrollIntoView({ behavior: "smooth" }); } },
     "[": () => goPage(-1), "]": () => goPage(1),
     "?": () => $("#help-dialog").showModal(),
     0: () => setFilters({}, { replace: true }),
@@ -408,21 +418,27 @@ function onKey(e) {
 
 const chart = new ApproachMap($("#chart"), {
   onHover: (id) => highlight(id),
-  onSelect: (id) => drawer.open(id),
+  onSelect: (id) => viewport.track(id),
   onBrush: (from, to) => setFilters({ approach_from: from, approach_to: to }),
 });
 const drawer = new DetailDrawer($("#drawer"), $("#scrim"), {
   onWatch: (d) => form.open({ neoId: d.neo_reference_id, name: d.name }),
+  onView: (id) => { drawer.close(); viewport.track(id); $(".stage").scrollIntoView({ behavior: "smooth" }); },
+});
+const viewport = new Viewport({
+  frame: $("#vp-frame"), title: $("#vp-title"), telemetry: $("#telemetry"), passGroup: $("#vp-pass"),
+  inspectButton: $("#vp-inspect"), onInspect: (id) => drawer.open(id),
+  onTrack: (id) => { state.track = id; writeUrl(); highlight(id); },
 });
 const form = new WatchForm($("#watch-dialog"), {
   toast,
-  onCreated: () => { loadWatchlist(); loadSummary(); loadObjects(); drawer.refresh(); },
+  onCreated: (entry) => { loadWatchlist(); loadSummary(); loadObjects(); drawer.refresh(); viewport.forget(entry.neo_reference_id); },
   onOpenObject: (id) => drawer.open(id),
 });
 
 function tick() { $("#clock").textContent = `${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC`; }
 
-window.addEventListener("popstate", () => { readUrl(); syncControls(); loadObjects(); });
+window.addEventListener("popstate", () => { readUrl(); syncControls(); loadObjects(); if (state.track) viewport.track(state.track); });
 document.addEventListener("keydown", onKey);
 $("#help-btn").addEventListener("click", () => $("#help-dialog").showModal());
 $("#watch-new").addEventListener("click", () => form.open());

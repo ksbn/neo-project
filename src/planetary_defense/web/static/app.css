@@ -75,6 +75,16 @@ main { padding: 16px 20px 90px; max-width: 1500px; margin: 0 auto; }
 .skeleton { background: linear-gradient(90deg, var(--panel) 0%, var(--panel-hi) 50%, var(--panel) 100%); background-size: 200% 100%; animation: shimmer 1.2s infinite; border-radius: 6px; }
 @keyframes shimmer { to { background-position: -200% 0; } }
 
+/* ------------------------------------------------------------------ 3D stage */
+.stage { display: grid; grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr); gap: 16px; margin-bottom: 16px; }
+@media (max-width: 1000px) { .stage { grid-template-columns: 1fr; } }
+.vp-controls { display: flex; gap: 8px; align-items: center; }
+.segmented.small label { padding: 3px 10px; font-size: .76rem; white-space: nowrap; }
+.vp-frame { width: 100%; height: 460px; border: 1px solid var(--border); border-radius: 6px; background: #040a10; display: block; }
+.vp-hint { font-size: .74rem; margin: 6px 0 0; }
+.vp-title { font-size: 1.05rem; font-weight: 600; margin-bottom: 6px; }
+.telemetry-panel .kv { margin-top: 8px; }
+
 /* ------------------------------------------------------------------ layout */
 .layout { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px; align-items: start; }
 @media (max-width: 1000px) { .layout { grid-template-columns: 1fr; } }
