@@ -17,7 +17,9 @@ from planetary_defense.domain.catalog import (
     ObjectPage,
     ObjectQuery,
     ObjectRow,
+    Summary,
     WatchlistEntry,
+    WatchlistPage,
     WatchRequest,
     WatchResult,
 )
@@ -128,6 +130,8 @@ class ObjectReader(Protocol):
 
     def alerts_for(self, neo_reference_id: str) -> list[AnomalyAlert]: ...
 
+    def summary(self, today: date) -> Summary: ...
+
 
 class WatchlistStore(Protocol):
     """The operator watchlist. ``add`` is idempotent per claim; raises AlreadyWatched, UnknownObject or
@@ -136,3 +140,7 @@ class WatchlistStore(Protocol):
     def add(self, request: WatchRequest, claim: IdempotencyClaim | None = None) -> WatchResult: ...
 
     def watch_of(self, neo_reference_id: str) -> WatchlistEntry | None: ...
+
+    def entries(self, limit: int, offset: int) -> WatchlistPage:
+        """Newest first."""
+        ...

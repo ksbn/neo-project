@@ -37,8 +37,10 @@ from planetary_defense.api.schemas import (
     ObjectSummary,
     Pagination,
     SeverityName,
+    SummaryOut,
     WatchlistEntryCreate,
     WatchlistEntryOut,
+    WatchlistPageOut,
 )
 from planetary_defense.application.catalog_service import CatalogService
 from planetary_defense.domain.catalog import ObjectQuery, Priority, SortKey, WatchRequest
@@ -131,6 +133,7 @@ def create_app(
         max_distance_ld: Annotated[float | None, Query(gt=0, le=10_000)] = None,
         min_velocity_km_s: Annotated[float | None, Query(ge=0, le=1_000)] = None,
         min_severity: SeverityName | None = None,
+        watched: bool | None = None,
         approach_from: date | None = None,
         approach_to: date | None = None,
         sort: SortKey = "-approach_date",
@@ -141,7 +144,8 @@ def create_app(
             query = ObjectQuery(
                 q=q, hazardous=hazardous, max_distance_ld=max_distance_ld, min_velocity_km_s=min_velocity_km_s,
                 min_severity=Severity[min_severity.upper()] if min_severity else None,
-                approach_from=approach_from, approach_to=approach_to, sort=sort, limit=limit, offset=offset,
+                approach_from=approach_from, approach_to=approach_to, watched=watched, sort=sort, limit=limit,
+                offset=offset,
             )
         except ValueError as exc:  # parameters that are fine alone but not together
             raise ApiError(400, "BAD_REQUEST", "The request has invalid parameters.",
@@ -157,6 +161,21 @@ def create_app(
     ) -> JSONResponse:
         detail = svc.get_object(neo_reference_id)
         return JSONResponse(ObjectDetailOut.of_detail(detail, today()).model_dump(mode="json"))
+
+    @app.get(f"{PREFIX}/watchlist", dependencies=[Depends(limit_reads)])
+    def list_watchlist_entries(
+        svc: Annotated[CatalogService, Depends(service)],
+        limit: Annotated[int, Query(ge=1, le=100)] = 25,
+        offset: Annotated[int, Query(ge=0, le=100_000)] = 0,
+    ) -> JSONResponse:
+        page = svc.list_watchlist(limit, offset)
+        body = WatchlistPageOut(items=[WatchlistEntryOut.of(e) for e in page.entries],
+                                pagination=Pagination.of(page.total, limit, offset))
+        return JSONResponse(body.model_dump(mode="json"))
+
+    @app.get(f"{PREFIX}/summary", dependencies=[Depends(limit_reads)])
+    def get_summary(svc: Annotated[CatalogService, Depends(service)]) -> JSONResponse:
+        return JSONResponse(SummaryOut.of(svc.summary(today())).model_dump(mode="json"))
 
     @app.post(f"{PREFIX}/watchlist", status_code=201, dependencies=[Depends(limit_writes)])
     def create_watchlist_entry(

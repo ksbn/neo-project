@@ -13,7 +13,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
-from planetary_defense.domain.catalog import ObjectDetail, ObjectRow, WatchlistEntry
+from planetary_defense.domain.catalog import ObjectDetail, ObjectRow, Summary, WatchlistEntry
 from planetary_defense.domain.models import AnomalyAlert, ApproachSummary, Severity
 from planetary_defense.domain.units import au_to_ld, km_to_ld
 
@@ -85,6 +85,7 @@ class ObjectSummary(_Out):
     estimated_diameter_max_m: float | None
     latest_approach: Approach | None
     alert_level: SeverityName | None
+    watched: bool
 
     @classmethod
     def fields_of(cls, r: ObjectRow) -> dict:
@@ -95,6 +96,7 @@ class ObjectSummary(_Out):
             estimated_diameter_max_m=_m(r.estimated_diameter_max_km),
             latest_approach=Approach.of(r.latest_approach) if r.latest_approach else None,
             alert_level=severity_name(r.alert_level) if r.alert_level is not None else None,
+            watched=r.watched,
         )
 
     @classmethod
@@ -204,6 +206,57 @@ class ObjectDetailOut(ObjectSummary):
             approach_history=[Approach.of(a) for a in d.approach_history],
             alerts=[Alert.of(a) for a in d.alerts],
             watch=WatchlistEntryOut.of(d.watch) if d.watch else None,
+        )
+
+
+class WatchlistPageOut(_Out):
+    items: list[WatchlistEntryOut]
+    pagination: Pagination
+
+
+# --------------------------------------------------------------------------- #
+# Summary (ADR 0001)
+# --------------------------------------------------------------------------- #
+
+
+class AlertCounts(_Out):
+    info: int
+    watch: int
+    warning: int
+    critical: int
+
+
+class DailyCount(_Out):
+    date: date
+    count: int
+
+
+class ClosestApproach(_Out):
+    neo_reference_id: str
+    name: str
+    approach: Approach
+
+
+class SummaryOut(_Out):
+    total_objects: int
+    hazardous_objects: int
+    watched_objects: int
+    alert_counts: AlertCounts
+    closest_approach: ClosestApproach | None
+    latest_approach_date: date | None
+    last_sync_at: datetime | None
+    approaches_per_day: list[DailyCount]
+
+    @classmethod
+    def of(cls, s: Summary) -> SummaryOut:
+        closest = (ClosestApproach(neo_reference_id=s.closest[0], name=s.closest[1], approach=Approach.of(s.closest[2]))
+                   if s.closest else None)
+        return cls(
+            total_objects=s.total_objects, hazardous_objects=s.hazardous_objects, watched_objects=s.watched_objects,
+            alert_counts=AlertCounts(**{severity_name(k): v for k, v in s.alert_counts.items()}),
+            closest_approach=closest, latest_approach_date=s.latest_approach_date,
+            last_sync_at=s.last_sync_at.astimezone(UTC) if s.last_sync_at else None,
+            approaches_per_day=[DailyCount(date=d, count=n) for d, n in s.approaches_per_day],
         )
 
 

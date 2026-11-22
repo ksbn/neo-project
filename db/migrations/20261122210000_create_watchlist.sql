@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS watchlist (
     alert_threshold_ld  DOUBLE PRECISION,
     note                TEXT,
     tags                TEXT[] NOT NULL DEFAULT '{}',
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),  -- real time, even within one transaction
 
     CONSTRAINT chk_watchlist_priority CHECK (priority IN ('low', 'medium', 'high', 'critical')),
     CONSTRAINT chk_watchlist_threshold CHECK (alert_threshold_ld IS NULL

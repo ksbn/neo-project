@@ -6,6 +6,7 @@ domain errors it raises into HTTP responses that follow ``openapi.yaml``.
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Final
 
 from planetary_defense.application.ports import AsteroidReader, ObjectReader, OrbitCache, WatchlistStore
@@ -14,6 +15,8 @@ from planetary_defense.domain.catalog import (
     ObjectDetail,
     ObjectPage,
     ObjectQuery,
+    Summary,
+    WatchlistPage,
     WatchRequest,
     WatchResult,
 )
@@ -58,3 +61,9 @@ class CatalogService:
         claim = (IdempotencyClaim(WATCH_SCOPE, idempotency_key, request.fingerprint())
                  if idempotency_key is not None else None)
         return self._watchlist.add(request, claim)
+
+    def summary(self, today: date) -> Summary:
+        return self._objects.summary(today)
+
+    def list_watchlist(self, limit: int, offset: int) -> WatchlistPage:
+        return self._watchlist.entries(limit, offset)

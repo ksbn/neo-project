@@ -9,7 +9,7 @@ violations become the domain errors the API maps to ``409`` / ``422``, anything 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Final, LiteralString
 
 import psycopg
@@ -22,7 +22,9 @@ from planetary_defense.domain.catalog import (
     ObjectQuery,
     ObjectRow,
     Priority,
+    Summary,
     WatchlistEntry,
+    WatchlistPage,
     WatchRequest,
     WatchResult,
 )
@@ -40,7 +42,8 @@ _BASE: Final = """
            a.relative_velocity_km_s, a.miss_distance_km, a.nasa_jpl_url,
            (SELECT MAX(x.severity) FROM anomaly_alerts x
             WHERE x.neo_reference_id = a.neo_reference_id AND x.close_approach_date = a.close_approach_date)
-               AS alert_level
+               AS alert_level,
+           EXISTS (SELECT 1 FROM watchlist w WHERE w.neo_reference_id = a.neo_reference_id) AS watched
     FROM asteroids a
 """
 
@@ -62,13 +65,14 @@ def _num(value: Any) -> float | None:
 
 
 def _object_row(r: Sequence[Any]) -> ObjectRow:
-    (ref, name, pha, sentry, h, dmin, dmax, day, body, velocity, miss, _url, level) = r
+    (ref, name, pha, sentry, h, dmin, dmax, day, body, velocity, miss, _url, level, watched) = r
     approach = (ApproachSummary(day, body or "Earth", float(velocity), float(miss))
                 if day is not None and velocity is not None and miss is not None else None)
     return ObjectRow(
         neo_reference_id=ref, name=name, is_potentially_hazardous=bool(pha), is_sentry_object=bool(sentry),
         absolute_magnitude_h=_num(h), estimated_diameter_min_km=_num(dmin), estimated_diameter_max_km=_num(dmax),
         latest_approach=approach, alert_level=Severity(level) if level is not None else None,
+        watched=bool(watched),
     )
 
 
@@ -85,6 +89,8 @@ def _filters(query: ObjectQuery) -> tuple[sql.Composable, list[Any]]:
         conditions.append(("relative_velocity_km_s >= %s", query.min_velocity_km_s))
     if query.min_severity is not None:
         conditions.append(("alert_level >= %s", int(query.min_severity)))
+    if query.watched is not None:
+        conditions.append(("watched = %s", query.watched))
     if query.approach_from is not None:
         conditions.append(("close_approach_date >= %s", query.approach_from))
     if query.approach_to is not None:
@@ -144,6 +150,53 @@ class ObjectRepository:
             raise _storage_error("Reading the object's alerts", exc) from exc
         return [AnomalyAlert(rule, Severity(sev), ref, name, day, msg, value, threshold)
                 for rule, sev, ref, name, day, msg, value, threshold in rows]
+
+
+    def summary(self, today: date, days: int = 14) -> Summary:
+        """KPI aggregates in one transaction (ADR 0001)."""
+        since = today - timedelta(days=days - 1)
+        totals = f"""
+            SELECT COUNT(*), COUNT(*) FILTER (WHERE is_potentially_hazardous), COUNT(*) FILTER (WHERE watched),
+                   MAX(close_approach_date),
+                   COUNT(*) FILTER (WHERE alert_level = 1), COUNT(*) FILTER (WHERE alert_level = 2),
+                   COUNT(*) FILTER (WHERE alert_level = 3), COUNT(*) FILTER (WHERE alert_level = 4)
+            FROM ({_BASE}) o
+        """
+        closest = f"""
+            SELECT * FROM ({_BASE}) o WHERE miss_distance_km IS NOT NULL
+            ORDER BY miss_distance_km, neo_reference_id LIMIT 1
+        """
+        per_day = """
+            SELECT d::date, COUNT(c.neo_reference_id)
+            FROM generate_series(%s::date, %s::date, INTERVAL '1 day') AS d
+            LEFT JOIN close_approaches c ON c.close_approach_date = d::date
+            GROUP BY d ORDER BY d
+        """
+        try:
+            with self._conn.transaction(), self._conn.cursor() as cur:
+                cur.execute(totals)
+                t = cur.fetchone()
+                cur.execute(closest)
+                c = cur.fetchone()
+                cur.execute("SELECT MAX(finished_at) FROM ingestion_runs WHERE status = 'success'")
+                sync = cur.fetchone()
+                cur.execute(per_day, (since, today))
+                days_rows = cur.fetchall()
+        except psycopg.Error as exc:
+            raise _storage_error("Summarising objects", exc) from exc
+        assert t is not None  # an aggregate always returns one row
+        total, hazardous, watched, latest, *levels = t
+        closest_pass = None
+        if c is not None:
+            row = _object_row(c)
+            if row.latest_approach is not None:
+                closest_pass = (row.neo_reference_id, row.name, row.latest_approach)
+        return Summary(
+            total_objects=int(total), hazardous_objects=int(hazardous), watched_objects=int(watched),
+            alert_counts={s: int(n) for s, n in zip(Severity, levels, strict=True)},
+            closest=closest_pass, latest_approach_date=latest, last_sync_at=sync[0] if sync else None,
+            approaches_per_day=[(d, int(n)) for d, n in days_rows],
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -253,3 +306,16 @@ class WatchlistRepository:
         except psycopg.Error as exc:
             raise _storage_error("Reading the watchlist", exc) from exc
         return _entry(row) if row is not None else None
+
+    def entries(self, limit: int, offset: int) -> WatchlistPage:
+        query = f"SELECT {_ENTRY_COLUMNS} FROM watchlist w JOIN asteroids a USING (neo_reference_id) " \
+                "ORDER BY w.created_at DESC, w.id LIMIT %s OFFSET %s"
+        try:
+            with self._conn.transaction(), self._conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM watchlist")
+                total = cur.fetchone()
+                cur.execute(query, (limit, offset))
+                rows = cur.fetchall()
+        except psycopg.Error as exc:
+            raise _storage_error("Listing the watchlist", exc) from exc
+        return WatchlistPage([_entry(r) for r in rows], int(total[0]) if total else 0)

@@ -34,6 +34,7 @@ class ObjectQuery:
     min_severity: Severity | None = None
     approach_from: date | None = None
     approach_to: date | None = None
+    watched: bool | None = None  # ADR 0002
     sort: SortKey = "-approach_date"
     limit: int = 25
     offset: int = 0
@@ -60,12 +61,27 @@ class ObjectRow:
     estimated_diameter_max_km: float | None
     latest_approach: ApproachSummary | None
     alert_level: Severity | None
+    watched: bool = False  # ADR 0002
 
 
 @dataclass(frozen=True)
 class ObjectPage:
     rows: list[ObjectRow]
     total: int  # every match, not only this page
+
+
+@dataclass(frozen=True)
+class Summary:
+    """Aggregates for the dashboard's KPIs (ADR 0001). Unknown or empty is None, never 0."""
+
+    total_objects: int
+    hazardous_objects: int
+    watched_objects: int
+    alert_counts: dict[Severity, int]  # objects by the worst alert on their latest pass; every level present
+    closest: tuple[str, str, ApproachSummary] | None  # (id, name, pass)
+    latest_approach_date: date | None
+    last_sync_at: datetime | None
+    approaches_per_day: list[tuple[date, int]]  # oldest first, zeros included
 
 
 @dataclass(frozen=True)
@@ -123,6 +139,12 @@ class WatchlistEntry:
     note: str | None
     tags: tuple[str, ...]
     created_at: datetime
+
+
+@dataclass(frozen=True)
+class WatchlistPage:
+    entries: list[WatchlistEntry]
+    total: int
 
 
 @dataclass(frozen=True)
