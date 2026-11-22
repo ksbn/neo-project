@@ -36,5 +36,9 @@ drift from) the tested Python code.
 * The dashboard's viewport is an iframe page that loads its data only through this operation.
 * The geometry building moves from the Streamlit component into `application/viewport.py`, shared by
   both UIs.
+* For passes years away the two-body model drifts from NASA/JPL's n-body prediction (Zoozve 2034:
+  model closest approach about 1.8 days later and 16.28 LD instead of 16.80 LD). The closest point is
+  still drawn at NASA's distance and labelled with NASA's date; `model_miss_ld` shows the model's figure,
+  so the difference is visible rather than hidden.
 * A cache miss can take a NASA round trip (about 2 s); later requests for the object are cache hits.
 * Additive change: existing clients are unaffected.

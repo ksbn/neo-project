@@ -924,6 +924,10 @@ components:
         approach_date:
           type: string
           format: date
+          description: |
+            NASA's date of closest approach. The drawn path comes from a two-body orbit model, which
+            drifts for passes years away (for Zoozve's 2034 pass by about two days and 0.5 LD);
+            `model_miss_ld` shows the model's own distance.
         window_days:
           type: integer
           minimum: 0
