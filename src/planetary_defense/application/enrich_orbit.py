@@ -12,13 +12,21 @@ two 3D views draw (see ``domain/orbital_math.py``).
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 
 from planetary_defense.application.ports import OrbitCache, OrbitSource
-from planetary_defense.domain.errors import OrbitUnavailable, StorageError, UpstreamError
-from planetary_defense.domain.models import CachedOrbit, OrbitLookup, OrbitOrigin, Trajectory3D, Vec3
+from planetary_defense.domain.errors import NeoError, OrbitUnavailable, StorageError, UpstreamError
+from planetary_defense.domain.models import (
+    AnomalyAlert,
+    CachedOrbit,
+    OrbitLookup,
+    OrbitOrigin,
+    Severity,
+    Trajectory3D,
+    Vec3,
+)
 from planetary_defense.domain.orbital_math import (
     approach_trajectory,
     earth_elements,
@@ -125,3 +133,50 @@ class OrbitEnricher:
         except StorageError as exc:
             logger.warning("Orbit cache unavailable, asking NASA instead: %s", exc)
             return None
+
+
+# --------------------------------------------------------------------------- #
+# Warming the cache for top-priority asteroids
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class WarmResult:
+    fetched: int = 0  # asked NASA
+    cached: int = 0  # already fresh in the cache
+    failed: int = 0
+
+
+def warm_orbits(
+    enricher: OrbitEnricher,
+    alerts: Iterable[AnomalyAlert],
+    *,
+    min_severity: Severity = Severity.WARNING,
+    limit: int = 10,
+) -> WarmResult:
+    """Make sure the orbits of the most urgent alerts' asteroids are cached.
+
+    So the 3D view of the asteroids people are most likely to open never waits
+    on NASA. Most urgent first, each asteroid once, at most ``limit``. Best
+    effort: operational failures are logged and counted, never raised.
+    """
+    ranked = sorted((a for a in alerts if a.severity >= min_severity), key=lambda a: -a.severity)
+    targets = list(dict.fromkeys(a.neo_reference_id for a in ranked))[:limit]
+    fetched = cached = failed = 0
+    for neo_reference_id in targets:
+        try:
+            origin = enricher.lookup(neo_reference_id).origin
+        except NeoError as exc:
+            logger.warning("Could not warm the orbit of %s: %s", neo_reference_id, exc)
+            failed += 1
+            continue
+        if origin is OrbitOrigin.CACHE:
+            cached += 1
+        elif origin is OrbitOrigin.NASA:
+            fetched += 1
+        else:  # STALE_CACHE: NASA could not refresh an old copy
+            failed += 1
+    if targets:
+        logger.info("Orbit cache warmed for %d asteroids: %d fetched, %d already cached, %d failed",
+                    len(targets), fetched, cached, failed)
+    return WarmResult(fetched=fetched, cached=cached, failed=failed)

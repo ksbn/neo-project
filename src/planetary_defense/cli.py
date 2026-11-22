@@ -40,6 +40,7 @@ from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import date
 from enum import IntEnum
 
+from planetary_defense.application.enrich_orbit import OrbitEnricher, warm_orbits
 from planetary_defense.application.ingest_feed import (
     AlertRecorder,
     DryRunStore,
@@ -50,7 +51,7 @@ from planetary_defense.application.ingest_feed import (
     RunObserver,
     WindowFailed,
 )
-from planetary_defense.application.ports import AlertStore, AsteroidStore, FeedSource, RunLog
+from planetary_defense.application.ports import AlertStore, AsteroidStore, FeedSource, OrbitCache, OrbitSource, RunLog
 from planetary_defense.config import Settings
 from planetary_defense.domain.anomaly_rules import default_rules
 from planetary_defense.domain.errors import (
@@ -62,9 +63,15 @@ from planetary_defense.domain.errors import (
     UpstreamError,
     UpstreamRequestError,
 )
+from planetary_defense.domain.models import AnomalyAlert, Severity
 from planetary_defense.infrastructure.db import connect
 from planetary_defense.infrastructure.nasa_client import NeoWsClient
-from planetary_defense.infrastructure.repository import AlertRepository, AsteroidRepository, IngestionRunRepository
+from planetary_defense.infrastructure.repository import (
+    AlertRepository,
+    AsteroidRepository,
+    IngestionRunRepository,
+    OrbitRepository,
+)
 
 __all__ = ["CLI_OUTCOMES", "ExitCode", "PipelineStats", "WindowFailed", "main", "outcome", "parse_args"]
 
@@ -107,6 +114,8 @@ FeedFactory = Callable[[Settings], AbstractContextManager[FeedSource]]
 StoreFactory = Callable[[Settings], AbstractContextManager[AsteroidStore]]
 RunLogFactory = Callable[[Settings], AbstractContextManager[RunLog]]
 AlertStoreFactory = Callable[[Settings], AbstractContextManager[AlertStore]]
+OrbitCacheFactory = Callable[[Settings], AbstractContextManager[OrbitCache]]
+OrbitSourceFactory = Callable[[Settings], AbstractContextManager[OrbitSource]]
 
 
 def open_nasa_feed(settings: Settings) -> NeoWsClient:
@@ -127,6 +136,17 @@ def open_postgres_run_log(settings: Settings) -> Iterator[IngestionRunRepository
     when a write on the data connection failed and was rolled back."""
     with connect(settings.db(), autocommit=True, application_name="neo-pipeline-runlog") as conn:
         yield IngestionRunRepository(conn)
+
+
+@contextmanager
+def open_postgres_orbit_cache(settings: Settings) -> Iterator[OrbitRepository]:
+    with connect(settings.db(), application_name="neo-pipeline-orbits") as conn:
+        yield OrbitRepository(conn)
+
+
+def open_nasa_orbit_source(settings: Settings) -> NeoWsClient:
+    """The NASA client with the batch retry profile: nobody is waiting on a scheduled run."""
+    return NeoWsClient(settings.nasa_api_key())
 
 
 @contextmanager
@@ -154,6 +174,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Last day to fetch, inclusive (YYYY-MM-DD). Defaults to --start-date.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Fetch and validate without writing to the database.")
+    parser.add_argument(
+        "--no-warm-orbits",
+        action="store_true",
+        help="Don't pre-fetch orbits (NASA /neo/{id}) for this run's warning and critical alerts.",
+    )
     parser.add_argument(
         "--log-level",
         default="INFO",
@@ -192,6 +217,26 @@ def _exit_code_for_failure(exc: WindowFailed, stats: PipelineStats, dry_run: boo
     return code
 
 
+def _warm_orbits(
+    settings: Settings,
+    alerts: list[AnomalyAlert],
+    open_orbit_cache: OrbitCacheFactory,
+    open_orbit_source: OrbitSourceFactory,
+) -> None:
+    """Cache the orbits of this run's warning-or-worse asteroids, so their 3D view opens instantly.
+
+    Best effort: the data is already saved, so nothing here changes the exit code.
+    """
+    if not any(a.severity >= Severity.WARNING for a in alerts):
+        return
+    try:
+        with open_orbit_cache(settings) as cache, open_orbit_source(settings) as source:
+            enricher = OrbitEnricher(cache, source, max_age=settings.orbit_cache_max_age())
+            warm_orbits(enricher, alerts)
+    except NeoError as exc:
+        logger.warning("Skipped warming orbits: %s", exc)
+
+
 def _log_table_size(store: AsteroidStore) -> None:
     """Informational only: every window is already committed, so a failure here must not change the exit code."""
     try:
@@ -208,6 +253,8 @@ def main(
     open_store: StoreFactory = open_postgres_store,
     open_run_log: RunLogFactory = open_postgres_run_log,
     open_alert_store: AlertStoreFactory = open_postgres_alert_store,
+    open_orbit_cache: OrbitCacheFactory = open_postgres_orbit_cache,
+    open_orbit_source: OrbitSourceFactory = open_nasa_orbit_source,
 ) -> int:
     """Run the CLI. The keyword arguments are the seams tests use to inject fakes."""
     args = parse_args(argv)
@@ -224,14 +271,17 @@ def main(
         alerts_cm = nullcontext(None) if args.dry_run else open_alert_store(settings)
         with store_cm as store, run_log_cm as run_log, alerts_cm as alert_store, open_feed(settings) as feed:
             observers: list[RunObserver] = [LogObserver(logger, dry_run=args.dry_run)]
-            if alert_store is not None:
-                observers.append(AlertRecorder(rules, alert_store))
+            alert_recorder = AlertRecorder(rules, alert_store) if alert_store is not None else None
+            if alert_recorder is not None:
+                observers.append(alert_recorder)
             if run_log is not None:
                 observers.append(IngestionRunRecorder(run_log))
             service = IngestService(feed, store, observers)
             service.run(args.start_date, args.end_date, stats)
             if not args.dry_run:
                 _log_table_size(store)
+            if alert_recorder is not None and not args.no_warm_orbits:
+                _warm_orbits(settings, alert_recorder.alerts, open_orbit_cache, open_orbit_source)
     except WindowFailed as exc:
         return _exit_code_for_failure(exc, stats, args.dry_run)
     except NeoError as exc:

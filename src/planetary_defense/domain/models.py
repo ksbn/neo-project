@@ -217,6 +217,7 @@ class AsteroidSummary:
     is_potentially_hazardous: bool
     close_approach_date: date | None
     miss_distance_km: float | None
+    relative_velocity_km_s: float | None = None
 
 
 @dataclass(frozen=True)
@@ -237,6 +238,8 @@ class Overview:
     hazardous: int
     latest_approach: date | None
     approaches: int = 0  # close approaches recorded (history), across all asteroids
+    closest_miss_ld: float | None = None  # closest recorded pass, in lunar distances
+    fastest_km_s: float | None = None  # fastest recorded pass
 
 
 @dataclass(frozen=True)
@@ -248,6 +251,7 @@ class AsteroidView:
     # Only the stored view has run records and per-asteroid history; the live fallback doesn't.
     status: PipelineStatus | None = None
     history_available: bool = False
+    alerts: list[AnomalyAlert] = field(default_factory=list)  # most urgent first
 
     @property
     def is_empty(self) -> bool:

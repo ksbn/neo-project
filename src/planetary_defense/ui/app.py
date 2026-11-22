@@ -1,37 +1,51 @@
-"""Streamlit dashboard: composition root and rendering. Started by the root ``app.py``.
+"""Planetary Defense Control Room: composition root (``LiveDashboard``) and page layout (``render``).
 
-This is the only dashboard module that knows the concrete adapters
-(PostgreSQL, the NASA client), Streamlit and pandas. Data access logic lives in
-``application/dashboard_service.py``; error wording lives in ``ui/messages.py``.
+``LiveDashboard`` is the only dashboard code that knows the concrete adapters
+(PostgreSQL, the NASA client), Streamlit's caches and the circuit breakers.
+``render`` draws the page from any :class:`application.dashboard_service.DashboardData`,
+so tests can render it with an in-memory fake. Components live in ``ui/components/``.
+Started by the root ``app.py``.
 """
 
-from dataclasses import asdict
 from datetime import UTC, date, datetime
 
-import pandas as pd
 import streamlit as st
 
 from planetary_defense.application.dashboard_service import (
     MAX_ROWS,
+    DashboardData,
     FallbackReader,
     LoadResult,
     Source,
     view_from_feed,
     view_from_store,
 )
+from planetary_defense.application.enrich_orbit import OrbitEnricher
 from planetary_defense.config import Settings
-from planetary_defense.domain.errors import NeoError
-from planetary_defense.domain.models import ApproachSummary, AsteroidSummary, AsteroidView
+from planetary_defense.domain.anomaly_rules import default_rules
+from planetary_defense.domain.errors import StorageError, UpstreamError
+from planetary_defense.domain.models import ApproachSummary, AsteroidView, CachedOrbit, OrbitLookup
 from planetary_defense.infrastructure.db import connect
-from planetary_defense.infrastructure.error_boundary import CircuitBreaker
+from planetary_defense.infrastructure.error_boundary import CircuitBreaker, GuardedOrbitSource
 from planetary_defense.infrastructure.nasa_client import INTERACTIVE, NeoWsClient
-from planetary_defense.infrastructure.repository import AsteroidRepository, IngestionRunRepository
+from planetary_defense.infrastructure.repository import (
+    AlertRepository,
+    AsteroidRepository,
+    IngestionRunRepository,
+    OrbitRepository,
+)
+from planetary_defense.ui.components import alerts_panel, approach_table, inspector_drawer, kpi_bar
 from planetary_defense.ui.messages import describe, run_health
 
-COLUMNS = [f for f in AsteroidSummary.__dataclass_fields__]
 DB_COOLDOWN_S = 30
 NASA_COOLDOWN_S = 120
 HISTORY_LIMIT = 100
+USER_AGENT = "neo-dashboard/1.0"
+
+
+# --------------------------------------------------------------------------- #
+# Live data: caches, breakers and adapters
+# --------------------------------------------------------------------------- #
 
 
 @st.cache_resource
@@ -42,15 +56,31 @@ def get_settings() -> Settings:
 @st.cache_resource
 def breakers() -> dict[str, CircuitBreaker]:
     """Shared by all sessions: one failure skips the source for everyone until the cooldown ends."""
-    return {"db": CircuitBreaker(DB_COOLDOWN_S), "nasa": CircuitBreaker(NASA_COOLDOWN_S)}
+    return {
+        "db": CircuitBreaker(DB_COOLDOWN_S),
+        "nasa": CircuitBreaker(NASA_COOLDOWN_S),
+        # Orbit lookups trip only on outages: one asteroid without an orbit must not block the others.
+        "nasa_orbits": CircuitBreaker(NASA_COOLDOWN_S, trips_on=(UpstreamError,)),
+    }
 
 
-# A source that raises is not cached by Streamlit, so the page recovers as soon
-# as the source is back; the breakers stop it from retrying on every rerun.
-@st.cache_data(ttl=300, show_spinner="Loading asteroids from PostgreSQL...")
+def _connect():
+    return connect(get_settings().db(), connect_timeout=3, application_name="neo-dashboard")
+
+
+# A function that raises is not cached by Streamlit, so the page recovers as soon
+# as a source is back; the breakers stop it from retrying on every rerun.
+@st.cache_data(ttl=300, show_spinner="Loading the control room from PostgreSQL...")
 def database_view() -> AsteroidView:
     with _connect() as conn:
-        return view_from_store(AsteroidRepository(conn), IngestionRunRepository(conn), MAX_ROWS)
+        return view_from_store(AsteroidRepository(conn), IngestionRunRepository(conn), AlertRepository(conn), MAX_ROWS)
+
+
+@st.cache_data(ttl=60, show_spinner="Fetching live data from NASA...")
+def nasa_view() -> AsteroidView:
+    settings = get_settings()
+    with NeoWsClient(settings.nasa_api_key(), profile=INTERACTIVE, user_agent=USER_AGENT) as client:
+        return view_from_feed(client, date.today(), rules=default_rules(settings.alert_thresholds()))
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -59,55 +89,80 @@ def approach_history(neo_reference_id: str) -> list[ApproachSummary]:
         return AsteroidRepository(conn).approach_history(neo_reference_id, HISTORY_LIMIT)
 
 
-def _connect():
-    return connect(get_settings().db(), connect_timeout=3, application_name="neo-dashboard")
+class _NoOrbitCache:
+    """Stands in for the orbit cache when the database is down, so lookups still reach NASA."""
+
+    def __init__(self, error: StorageError) -> None:
+        self._error = error
+
+    def get_orbit(self, neo_reference_id: str) -> CachedOrbit | None:
+        raise self._error
+
+    def put_orbit(self, orbit: CachedOrbit) -> None:
+        raise self._error
 
 
-@st.cache_data(ttl=60, show_spinner="Fetching live data from NASA...")
-def nasa_view() -> AsteroidView:
-    key = get_settings().nasa_api_key()
-    with NeoWsClient(key, profile=INTERACTIVE, user_agent="neo-dashboard/1.0") as client:
-        return view_from_feed(client, date.today())
+@st.cache_data(ttl=600, show_spinner="Looking up the orbit...")
+def orbit_lookup(neo_reference_id: str) -> OrbitLookup:
+    settings = get_settings()
+    with NeoWsClient(settings.nasa_api_key(), profile=INTERACTIVE, user_agent=USER_AGENT) as client:
+        source = GuardedOrbitSource(client, breakers()["nasa_orbits"])
+        try:
+            conn = _connect()
+        except StorageError as exc:
+            return OrbitEnricher(_NoOrbitCache(exc), source, max_age=settings.orbit_cache_max_age()).lookup(
+                neo_reference_id
+            )
+        with conn:
+            enricher = OrbitEnricher(OrbitRepository(conn), source, max_age=settings.orbit_cache_max_age())
+            return enricher.lookup(neo_reference_id)
 
 
-def load() -> LoadResult:
-    guard = breakers()
-    return FallbackReader(
-        Source(
-            "PostgreSQL database",
-            lambda: guard["db"].call(database_view),
-            empty_hint="the asteroids table is empty (run scripts/run_pipeline.sh)",
-        ),
-        Source(
-            "NASA NeoWs API (live fallback)",
-            lambda: guard["nasa"].call(nasa_view),
-            empty_hint="returned no asteroids for the last few days",
-        ),
-        describe=describe,
-    ).load()
+class LiveDashboard:
+    """:class:`DashboardData` over PostgreSQL first and NASA as the fallback."""
+
+    def load(self) -> LoadResult:
+        guard = breakers()
+        return FallbackReader(
+            Source(
+                "PostgreSQL database",
+                lambda: guard["db"].call(database_view),
+                empty_hint="the asteroids table is empty (run scripts/run_pipeline.sh)",
+            ),
+            Source(
+                "NASA NeoWs API (live fallback)",
+                lambda: guard["nasa"].call(nasa_view),
+                empty_hint="returned no asteroids for the last few days",
+            ),
+            describe=describe,
+        ).load()
+
+    def approach_history(self, neo_reference_id: str) -> list[ApproachSummary]:
+        return breakers()["db"].call(lambda: approach_history(neo_reference_id))
+
+    def orbit(self, neo_reference_id: str) -> OrbitLookup:
+        return orbit_lookup(neo_reference_id)
+
+    def refresh(self) -> None:
+        for cached in (database_view, nasa_view, approach_history, orbit_lookup):
+            cached.clear()
+        get_settings.clear()
+        for breaker in breakers().values():
+            breaker.reset()
 
 
-def refresh() -> None:
-    database_view.clear()
-    approach_history.clear()
-    nasa_view.clear()
-    get_settings.clear()
-    for breaker in breakers().values():
-        breaker.reset()
+# --------------------------------------------------------------------------- #
+# Page
+# --------------------------------------------------------------------------- #
 
 
-def to_frame(rows: list[AsteroidSummary]) -> pd.DataFrame:
-    """The one place rows become a DataFrame."""
-    return pd.DataFrame([asdict(r) for r in rows], columns=COLUMNS)
-
-
-def render_sidebar(result: LoadResult) -> None:
+def render_sidebar(result: LoadResult, data: DashboardData) -> None:
     with st.sidebar:
         st.header("Data source")
         if result.source:
             st.success(result.source)
-        if st.button("🔄 Refresh data"):
-            refresh()
+        if st.button("Refresh data"):
+            data.refresh()
             st.rerun()
         if result.diagnostics:
             with st.expander("Diagnostics", expanded=result.source is None):
@@ -118,103 +173,36 @@ def render_sidebar(result: LoadResult) -> None:
 def render_status(view: AsteroidView) -> None:
     """The pipeline's last run; only the stored view has one."""
     if not view.history_available:
+        st.info("Showing live NASA data: the database is unavailable, so alerts are scored on the fly.")
         return
     health = run_health(view.status, datetime.now(UTC))
     getattr(st, health.level)(health.text)
 
 
-def render_overview(view: AsteroidView) -> None:
-    overview = view.overview
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Total Asteroids Tracked", overview.total)
-    col2.metric("Potentially Hazardous", overview.hazardous)
-    col3.metric("Close Approaches Recorded", overview.approaches)
-    col4.metric("Latest Approach Date", str(overview.latest_approach) if overview.latest_approach else "—")
+def render(data: DashboardData) -> None:
+    st.set_page_config(page_title="Planetary Defense Control Room", page_icon="🌠", layout="wide")
+    st.title("Planetary Defense Control Room")
+    st.caption("Near-Earth objects from NASA NeoWs: alerts, close approaches and orbits.")
 
-
-def render_table(view: AsteroidView) -> pd.DataFrame:
-    st.subheader("📋 Asteroid Records")
-
-    search_query = st.text_input("Search asteroid by name:", "")
-    hazardous_only = st.checkbox("Show only potentially hazardous asteroids")
-
-    df = to_frame(view.rows)
-    if search_query:
-        df = df.loc[df["name"].str.contains(search_query, case=False, na=False, regex=False)]
-    if hazardous_only:
-        df = df.loc[df["is_potentially_hazardous"]]
-
-    loaded = len(view.rows)
-    scope = f"the newest {loaded} of {view.overview.total}" if loaded < view.overview.total else f"{loaded}"
-    st.caption(f"Showing {len(df)} of {scope} asteroids")
-    st.dataframe(
-        df,
-        width="stretch",
-        hide_index=True,
-        column_config={
-            "neo_reference_id": "NEO ID",
-            "name": "Name",
-            "estimated_diameter_min_km": st.column_config.NumberColumn("Min diameter (km)", format="%.3f"),
-            "estimated_diameter_max_km": st.column_config.NumberColumn("Max diameter (km)", format="%.3f"),
-            "is_potentially_hazardous": st.column_config.CheckboxColumn("Hazardous"),
-            "close_approach_date": st.column_config.DateColumn("Close approach"),
-            "miss_distance_km": st.column_config.NumberColumn("Miss distance (km)", format="%,.0f"),
-        },
-    )
-    return df
-
-
-def render_history(view: AsteroidView, shown: pd.DataFrame) -> None:
-    """Every recorded close approach of one asteroid from the (filtered) table."""
-    st.subheader("Close Approach History")
-    if not view.history_available:
-        st.caption("History is only available from the database, not from the live NASA fallback.")
-        return
-    if shown.empty:
-        st.caption("No asteroid matches the filters above.")
-        return
-
-    names = dict(zip(shown["neo_reference_id"], shown["name"], strict=True))
-    neo_id = st.selectbox("Asteroid", list(names), format_func=lambda i: f"{names[i]} ({i})")
-    if neo_id is None:
-        return
-    try:
-        rows = breakers()["db"].call(lambda: approach_history(neo_id))
-    except NeoError as exc:
-        st.caption(f"History unavailable: {describe(exc)}")
-        return
-
-    st.caption(f"{len(rows)} recorded approach{'es' if len(rows) != 1 else ''} (newest first)")
-    st.dataframe(
-        pd.DataFrame([asdict(r) for r in rows], columns=[f for f in ApproachSummary.__dataclass_fields__]),
-        width="stretch",
-        hide_index=True,
-        column_config={
-            "close_approach_date": st.column_config.DateColumn("Close approach"),
-            "orbiting_body": "Body",
-            "relative_velocity_km_s": st.column_config.NumberColumn("Velocity (km/s)", format="%.3f"),
-            "miss_distance_km": st.column_config.NumberColumn("Miss distance (km)", format="%,.0f"),
-        },
-    )
-
-
-def main() -> None:
-    st.set_page_config(page_title="NASA NeoWs Dashboard", page_icon="🌠", layout="wide")
-    st.title("NASA Near Earth Objects (NeoWs) Dashboard")
-    st.markdown("Live data pipeline tracker powered by Python, PostgreSQL, and NASA's NeoWs API.")
-
-    result = load()
-    render_sidebar(result)
-
+    result = data.load()
+    render_sidebar(result, data)
     if result.view is None:
         st.warning(
             "Unable to fetch asteroid data from the database or the NASA API right now. "
             "Check the Diagnostics panel in the sidebar for details."
         )
-        st.stop()
         return
 
-    render_status(result.view)
-    render_overview(result.view)
-    shown = render_table(result.view)
-    render_history(result.view, shown)
+    view = result.view
+    render_status(view)
+    kpi_bar.render(view)
+    left, right = st.columns([3, 2], gap="large")
+    with left:
+        alerts_panel.render(view)
+        approach_table.render(view)
+    with right:
+        inspector_drawer.render(view, data)
+
+
+def main() -> None:
+    render(LiveDashboard())

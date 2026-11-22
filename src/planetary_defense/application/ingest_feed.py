@@ -22,6 +22,7 @@ from planetary_defense.application.ports import AlertStore, AsteroidStore, FeedS
 from planetary_defense.domain.anomaly_rules import Rule, evaluate
 from planetary_defense.domain.errors import NeoError, StorageError
 from planetary_defense.domain.models import (
+    AnomalyAlert,
     FeedBatch,
     IngestionRun,
     InvalidObject,
@@ -279,7 +280,11 @@ class AlertRecorder:
     def __init__(self, rules: Iterable[Rule], store: AlertStore) -> None:
         self._rules = tuple(rules)
         self._store = store
-        self.raised = 0
+        self.alerts: list[AnomalyAlert] = []  # every alert saved during the run
+
+    @property
+    def raised(self) -> int:
+        return len(self.alerts)
 
     def run_started(self, stats: PipelineStats) -> None:
         pass
@@ -293,7 +298,7 @@ class AlertRecorder:
         except StorageError as exc:
             logger.warning("Could not save alerts for %s..%s: %s", report.start, report.end, exc)
             return
-        self.raised += len(alerts)
+        self.alerts.extend(alerts)
         if alerts:
             by_severity = ", ".join(
                 f"{sum(a.severity is s for a in alerts)} {s.name.lower()}"

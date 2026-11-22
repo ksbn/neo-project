@@ -7,14 +7,16 @@ import pytest
 from planetary_defense.application.dashboard_service import FallbackReader, Source, view_from_feed, view_from_store
 from planetary_defense.domain.errors import ConfigError, NeoError, StorageError
 from planetary_defense.domain.models import (
+    AnomalyAlert,
     AsteroidView,
-    Overview,
     PipelineStatus,
+    Severity,
 )
+from planetary_defense.domain.units import LUNAR_DISTANCE_KM
 from planetary_defense.infrastructure.nasa_dto import parse_feed
 from planetary_defense.ui.messages import describe
 
-from fakes import LAST_RUN, StubFeed, StubReader, StubRuns, view
+from fakes import LAST_RUN, StubAlerts, StubFeed, StubReader, StubRuns, view
 from support import make_feed, make_neo
 
 
@@ -78,7 +80,7 @@ def test_programmer_errors_propagate_instead_of_triggering_the_fallback():
 
 def test_store_view_keeps_whole_table_totals_with_limited_rows():
     reader = StubReader()
-    result = view_from_store(reader, StubRuns(), limit=1)
+    result = view_from_store(reader, StubRuns(), StubAlerts(), limit=1)
     assert reader.limits == [1]
     assert result.overview.total == 10_000 and len(result.rows) == 1
     assert result.history_available
@@ -87,7 +89,7 @@ def test_store_view_keeps_whole_table_totals_with_limited_rows():
 
 def test_store_view_survives_a_status_failure():
     """Run status is secondary: losing it must not hide the asteroid data."""
-    result = view_from_store(StubReader(), StubRuns(fail=True))
+    result = view_from_store(StubReader(), StubRuns(fail=True), StubAlerts())
     assert result.status is None and result.overview.total == 10_000
 
 
@@ -109,7 +111,11 @@ def test_feed_view_covers_three_days_dedupes_and_sorts_newest_first():
     assert feed.calls == [(date(2026, 11, 8), date(2026, 11, 10))]
     assert [r.neo_reference_id for r in result.rows][:2] in (["twice", "new"], ["new", "twice"])
     assert result.rows[-1].neo_reference_id == "old"
-    assert result.overview == Overview(total=3, hazardous=1, latest_approach=date(2026, 11, 10), approaches=4)
+    assert (result.overview.total, result.overview.hazardous, result.overview.approaches) == (3, 1, 4)
+    assert result.overview.latest_approach == date(2026, 11, 10)
+    assert result.overview.closest_miss_ld == pytest.approx(4567890.123 / LUNAR_DISTANCE_KM)
+    assert result.overview.fastest_km_s == pytest.approx(12.345678)
+    assert result.rows[0].relative_velocity_km_s == pytest.approx(12.345678)
     assert result.status is None and not result.history_available
 
 
@@ -123,3 +129,29 @@ def test_every_error_class_has_safe_wording():
         if kind.__module__ == NeoError.__module__:
             text = describe(kind("detail with secrets at 10.0.0.5"))
             assert text and isinstance(text, str)
+
+
+ALERT = AnomalyAlert("close_approach", Severity.WARNING, "a", "(a)", date(2026, 11, 10), "Passes 3.00 LD", 3.0, 5.0)
+
+
+def test_store_view_includes_stored_alerts():
+    result = view_from_store(StubReader(), StubRuns(), StubAlerts([ALERT]))
+    assert result.alerts == [ALERT]
+
+
+def test_store_view_survives_an_alerts_failure():
+    """E.g. before the anomaly_alerts migration has run: the asteroid data is still shown."""
+    result = view_from_store(StubReader(), StubRuns(), StubAlerts(fail=True))
+    assert result.alerts == [] and result.overview.total == 10_000 and result.status is not None
+
+
+def test_feed_view_scores_alerts_live():
+    near = make_neo("near", "2026-11-10")
+    near["close_approach_data"][0]["miss_distance"]["kilometers"] = str(3 * LUNAR_DISTANCE_KM)
+    batch = parse_feed(make_feed({"2026-11-10": [near, make_neo("far", "2026-11-10")]}))
+
+    result = view_from_feed(StubFeed(batch), today=date(2026, 11, 10))
+    assert [(a.neo_reference_id, a.rule, a.severity) for a in result.alerts] == [
+        ("near", "close_approach", Severity.WARNING),
+    ]
+    assert result.overview.closest_miss_ld == pytest.approx(3.0)

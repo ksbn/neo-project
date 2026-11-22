@@ -46,6 +46,15 @@ def julian_day(moment: date | datetime) -> float:
     return moment.toordinal() + _JD_OF_ORDINAL_ZERO
 
 
+def date_from_jd(jd: float) -> date:
+    """The calendar date (UTC) of a Julian day."""
+    return date.fromordinal(math.floor(jd - _JD_OF_ORDINAL_ZERO))
+
+
+def orbital_period_days(semi_major_axis_au: float) -> float:
+    return 2 * math.pi / mean_motion(semi_major_axis_au)
+
+
 def mean_motion(semi_major_axis_au: float) -> float:
     """Mean motion in radians per day (Kepler's third law)."""
     return GAUSSIAN_K / semi_major_axis_au**1.5

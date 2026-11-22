@@ -9,7 +9,8 @@ from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, date, datetime
 
-from planetary_defense.domain.errors import StorageError, UpstreamUnavailable
+from planetary_defense.application.dashboard_service import LoadResult
+from planetary_defense.domain.errors import OrbitUnavailable, StorageError, UpstreamUnavailable
 from planetary_defense.domain.models import (
     AnomalyAlert,
     ApproachSummary,
@@ -21,9 +22,12 @@ from planetary_defense.domain.models import (
     Observation,
     OrbitalElements,
     OrbitData,
+    OrbitLookup,
+    OrbitOrigin,
     Overview,
     PipelineStatus,
     RunStatus,
+    Severity,
     UpsertResult,
     latest,
 )
@@ -192,3 +196,72 @@ class AlertStoreSpy:
         if self.fail is not None:
             raise self.fail
         self.calls.append((list(passes), list(alerts)))
+
+
+class StubAlerts:
+    """AlertReader returning fixed alerts (or failing like a missing anomaly_alerts table)."""
+
+    def __init__(self, alerts: list[AnomalyAlert] | None = None, fail: bool = False) -> None:
+        self.alerts = alerts or []
+        self.fail = fail
+
+    def recent_alerts(self, min_severity: Severity, limit: int) -> list[AnomalyAlert]:
+        if self.fail:
+            raise StorageError('relation "anomaly_alerts" does not exist')
+        return [a for a in self.alerts if a.severity >= min_severity][:limit]
+
+
+# --------------------------------------------------------------------------- #
+# The dashboard as the page sees it
+# --------------------------------------------------------------------------- #
+
+
+def control_room_view(*, live: bool = False) -> AsteroidView:
+    """Three asteroids: Zoozve with a warning, 'b' with a watch alert, 'a' quiet but hazardous."""
+    rows = [
+        AsteroidSummary("2524522", "524522 Zoozve (2002 VE68)", 0.2, 0.45, True, date(2026, 11, 2), 6_019_000.0, 9.5),
+        AsteroidSummary("b", "(2019 BG3)", 0.05, 0.1, False, date(2026, 11, 20), 9_000_000.0, 36.9),
+        AsteroidSummary("a", "(2001 KF54)", 0.3, 0.7, True, date(2026, 11, 18), 20_000_000.0, 12.0),
+    ]
+    alerts = [
+        AnomalyAlert("hazardous_close_pass", Severity.WARNING, "2524522", rows[0].name, date(2026, 11, 2),
+                     "Potentially hazardous asteroid passing close: Passes 15.65 LD from Earth, within 20 LD"),
+        AnomalyAlert("high_velocity", Severity.WATCH, "b", rows[1].name, date(2026, 11, 20),
+                     "Relative velocity 36.9 km/s (at least 30 km/s)", 36.9, 30.0),
+        AnomalyAlert("potentially_hazardous", Severity.INFO, "a", rows[2].name, date(2026, 11, 18),
+                     "Classified by NASA as a potentially hazardous asteroid"),
+    ]
+    overview = Overview(total=3, hazardous=2, latest_approach=date(2026, 11, 20), approaches=4,
+                        closest_miss_ld=15.65, fastest_km_s=36.9)
+    if live:
+        return AsteroidView(overview=overview, rows=rows, alerts=alerts)
+    status = PipelineStatus(last_run=LAST_RUN, last_success_at=LAST_RUN.finished_at)
+    return AsteroidView(overview=overview, rows=rows, status=status, history_available=True, alerts=alerts)
+
+
+class FakeDashboard:
+    """:class:`application.dashboard_service.DashboardData` in memory."""
+
+    def __init__(self, *, live: bool = False, empty: bool = False, orbit_fails: bool = False) -> None:
+        self.view = None if empty else control_room_view(live=live)
+        self.orbit_fails = orbit_fails
+        self.refreshed = 0
+
+    def load(self) -> LoadResult:
+        if self.view is None:
+            return LoadResult(None, None, ["PostgreSQL database: unavailable", "NASA: unavailable"])
+        return LoadResult(self.view, "NASA NeoWs API (live fallback)" if not self.view.history_available
+                          else "PostgreSQL database", [])
+
+    def approach_history(self, neo_reference_id: str) -> list[ApproachSummary]:
+        return [ApproachSummary(date(2026, 11, 2), "Earth", 9.5, 6_019_000.0),
+                ApproachSummary(date(2002, 11, 8), "Earth", 10.1, 8_000_000.0)]
+
+    def orbit(self, neo_reference_id: str) -> OrbitLookup:
+        if self.orbit_fails:
+            raise OrbitUnavailable(f"No orbit for {neo_reference_id}: NASA could not be reached and none is cached")
+        return OrbitLookup(replace(zoozve_orbit(), neo_reference_id=neo_reference_id),
+                           datetime(2026, 11, 20, 8, 0, tzinfo=UTC), OrbitOrigin.CACHE)
+
+    def refresh(self) -> None:
+        self.refreshed += 1

@@ -182,3 +182,11 @@ def test_thresholds_are_configurable():
 def test_thresholds_must_be_ordered():
     with pytest.raises(ValueError, match="critical_ld"):
         AlertThresholds(critical_ld=6.0, warning_ld=5.0)
+
+
+def test_equal_tier_thresholds_resolve_to_the_more_severe_tier():
+    """AlertThresholds allows warning_ld == watch_ld; the warning must win, whatever the order given."""
+    watch, warning = (12.0, Severity.WATCH), (12.0, Severity.WARNING)
+    for tiers in ([watch, warning], [warning, watch]):
+        alert = miss_distance(tiers)(obs(ld=11.9))
+        assert alert is not None and alert.severity is Severity.WARNING

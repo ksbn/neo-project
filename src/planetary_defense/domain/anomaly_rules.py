@@ -26,7 +26,8 @@ Rule = Callable[[Observation], AnomalyAlert | None]
 
 def miss_distance(tiers: Sequence[tuple[float, Severity]], rule: str = "close_approach") -> Rule:
     """Fires when the pass is within a tier's distance (LD); the tightest matching tier wins."""
-    ordered = sorted(tiers)  # nearest threshold first
+    # Nearest threshold first; on equal thresholds the more severe tier wins.
+    ordered = sorted(tiers, key=lambda tier: (tier[0], -tier[1]))
 
     def check(obs: Observation) -> AnomalyAlert | None:
         if obs.approach is None:

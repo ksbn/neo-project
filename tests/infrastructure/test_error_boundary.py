@@ -2,9 +2,17 @@
 
 import pytest
 
-from planetary_defense.domain.errors import StorageError, UpstreamAuthError, UpstreamUnavailable
-from planetary_defense.infrastructure.error_boundary import CircuitBreaker, SourceCoolingDown
+from planetary_defense.domain.errors import (
+    OrbitUnavailable,
+    StorageError,
+    UpstreamAuthError,
+    UpstreamError,
+    UpstreamUnavailable,
+)
+from planetary_defense.infrastructure.error_boundary import CircuitBreaker, GuardedOrbitSource, SourceCoolingDown
 from planetary_defense.ui.messages import describe
+
+from fakes import FakeOrbitSource
 
 
 class Clock:
@@ -76,3 +84,30 @@ def test_ui_wording_hides_storage_details_and_explains_cooldowns():
 
     cooling = describe(SourceCoolingDown(StorageError("host 10.0.0.5"), 12.4))
     assert "database is unavailable" in cooling and "Retrying in 12s" in cooling and "10.0.0.5" not in cooling
+
+
+# --------------------------------------------------------------------------- #
+# Which errors trip a breaker, and the guarded orbit source
+# --------------------------------------------------------------------------- #
+
+
+def test_breaker_can_be_limited_to_outage_errors():
+    breaker = CircuitBreaker(30, Clock(), trips_on=(UpstreamError,))
+    with pytest.raises(OrbitUnavailable):
+        breaker.call(Flaky(OrbitUnavailable("NASA has no orbit for 1")))
+    assert breaker.call(lambda: "next asteroid") == "next asteroid"  # one missing orbit doesn't block the rest
+
+
+def test_guarded_orbit_source_turns_a_cooldown_into_an_outage():
+    """So the enricher falls back to a stale cached orbit, exactly as if NASA had failed."""
+    clock = Clock()
+    source = FakeOrbitSource(fail=UpstreamUnavailable("NASA down"))
+    guarded = GuardedOrbitSource(source, CircuitBreaker(120, clock, trips_on=(UpstreamError,)))
+
+    with pytest.raises(UpstreamUnavailable, match="NASA down"):
+        guarded.fetch_orbit("1")
+    with pytest.raises(UpstreamUnavailable, match="skipped") as exc:
+        guarded.fetch_orbit("2")
+
+    assert source.calls == ["1"]  # NASA was not asked again during the cooldown
+    assert isinstance(exc.value.__cause__, SourceCoolingDown)

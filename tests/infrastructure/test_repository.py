@@ -23,6 +23,7 @@ from planetary_defense.domain.models import (
     RunStatus,
     Severity,
 )
+from planetary_defense.domain.units import LUNAR_DISTANCE_KM
 from planetary_defense.infrastructure import nasa_dto
 from planetary_defense.infrastructure.db import connect
 from planetary_defense.infrastructure.nasa_dto import parse_feed
@@ -148,8 +149,18 @@ def test_overview_counts_the_whole_table_not_just_the_listed_rows(conn):
     repo.save(records(make_neo("3", "2026-11-12"), day="2026-11-12"))
 
     assert len(repo.list_recent(limit=1)) == 1
-    assert repo.overview() == Overview(total=3, hazardous=1, latest_approach=date(2026, 11, 12), approaches=3)
+    overview = repo.overview()
+    assert (overview.total, overview.hazardous, overview.latest_approach, overview.approaches) == (
+        3, 1, date(2026, 11, 12), 3,
+    )
+    assert overview.closest_miss_ld == pytest.approx(4567890.123 / LUNAR_DISTANCE_KM)  # test NEOs: 11.88 LD
+    assert overview.fastest_km_s == pytest.approx(12.345678)
+    assert repo.list_recent(limit=1)[0].relative_velocity_km_s == pytest.approx(12.345678)
     assert repo.count() == 3
+
+
+def test_overview_of_an_empty_table(conn):
+    assert AsteroidRepository(conn).overview() == Overview(total=0, hazardous=0, latest_approach=None)
 
 
 def test_newest_observation_wins_within_one_batch(conn):
