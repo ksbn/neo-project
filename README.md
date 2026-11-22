@@ -121,6 +121,46 @@ Failures are not cached, so the page recovers as soon as a source is back, but a
 
 ---
 
+### 6. REST API and the interactive dashboard
+
+```bash
+neo-api            # http://localhost:8010  (dashboard)  ·  /api/v1  (API)  ·  /api/docs  (contract)
+```
+
+The API is **contract first**: [`openapi.yaml`](openapi.yaml) (OpenAPI 3.1) was written, linted with
+`npx @redocly/cli lint openapi.yaml` and committed before any code, and CI lints it on every push.
+Later contract changes are recorded as ADRs in [`docs/adr/`](docs/adr/).
+
+| Operation | What it does |
+|---|---|
+| `GET /api/v1/objects` | Filter (`q`, `hazardous`, `max_distance_ld`, `min_velocity_km_s`, `min_severity`, `watched`, `approach_from`/`approach_to`), sort, paginate (`limit`/`offset`, `total`, `next_offset`/`prev_offset`) |
+| `GET /api/v1/objects/{id}` | Every attribute: latest and recorded passes, cached orbit (all `null` with `tracked: false` when not cached), next predicted pass, alerts, watchlist entry; `404` if unknown |
+| `POST /api/v1/watchlist` | Watch an object: validated body, `201` / `400` / `409` / `422`, optional `Idempotency-Key` |
+| `GET /api/v1/watchlist` | The watchlist, newest first ([ADR 0002](docs/adr/0002-watchlist-listing-and-watched-flag.md)) |
+| `GET /api/v1/summary` | KPI aggregates ([ADR 0001](docs/adr/0001-summary-endpoint-for-dashboard-kpis.md)) |
+
+Every error has the same `ErrorResponse` body (`code`, `message`, `details[{field, reason}]`, `request_id`,
+`timestamp`) and `X-Request-ID` header: `400` unreadable request, `404`, `409` already watched, `422` body
+breaks the rules / unknown object / idempotency key reused, `429` rate limited (`Retry-After`), `500` bug,
+`503` database down. Driver errors and stack traces stay in the server log under the request ID.
+
+**Idempotent writes.** Send the same `Idempotency-Key` to retry `POST /watchlist` safely: the same key and
+body replays the original `201` (`Idempotent-Replayed: true`), the same key with a different body is a `422`.
+A PostgreSQL advisory lock serialises concurrent retries of one key; keys expire after 24 hours; only
+successful writes are stored, so a failed request can be retried with its key.
+
+**Contract tests** (`tests/api/`): every response in the API tests is validated against `openapi.yaml`
+(`tests/contract.py`), the routes must equal the contract's operations, and parametrised cases prove the
+API accepts exactly the bodies and query values the contract's JSON Schema accepts.
+
+**The dashboard** (`src/planetary_defense/web/static/`, plain ES modules, no build step) reads only through
+the API, which a test enforces. It has KPI cards from `/summary` (click a severity, a day or a figure to filter);
+live debounced search; presets and sliders, all kept in the URL; an approach map synchronised with the table
+(hover highlights both, drag across dates to filter); a detail drawer that shows unknown values as
+"N/A (untracked)"; a watchlist form that shows the API's field errors and retries with the same idempotency
+key ("Test: send twice" demonstrates the replay); a compare tray; empty and error states with Retry; and
+keyboard shortcuts (`/` `j` `k` `Enter` `w` `x` `[` `]` `1`–`6` `0` `Esc` `?`).
+
 ## Code Layout
 
 The code is one package, `src/planetary_defense/`, in four layers. Each layer imports only from the layers inside it: `domain` imports nothing from the project (and no Streamlit, HTTP or SQL libraries), `application` imports only `domain`, and the entry points (`cli.py`, `ui/app.py`) are the only modules that pick concrete adapters.

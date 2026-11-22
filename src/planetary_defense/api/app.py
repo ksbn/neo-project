@@ -219,7 +219,7 @@ def create_app(
 
 
 def main() -> None:  # pragma: no cover - starts a server
-    """``neo-api``: serve the API and the dashboard on http://localhost:8000."""
+    """``neo-api``: serve the API and the dashboard on http://localhost:8010."""
     import argparse
     from contextlib import contextmanager
 
@@ -230,7 +230,7 @@ def main() -> None:  # pragma: no cover - starts a server
 
     parser = argparse.ArgumentParser(description="Serve the ASTRAEA REST API and dashboard.")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--port", type=int, default=8010)
     args = parser.parse_args()
     settings = Settings.load()
 

@@ -34,7 +34,7 @@ dev = [
 [project.scripts]
 # `neo-pipeline --start 2026-11-01` == `python -m planetary_defense.cli --start 2026-11-01`
 neo-pipeline = "planetary_defense.cli:main"
-# REST API (openapi.yaml) and the dashboard that consumes it, on http://localhost:8000
+# REST API (openapi.yaml) and the dashboard that consumes it, on http://localhost:8010
 neo-api = "planetary_defense.api.app:main"
 
 [tool.setuptools.packages.find]

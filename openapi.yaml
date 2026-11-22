@@ -35,7 +35,7 @@ info:
     identifier: MIT
 servers:
   - url: /api/v1
-    description: Same origin as the dashboard (locally http://localhost:8000)
+    description: Same origin as the dashboard (locally http://localhost:8010)
 security: []
 tags:
   - name: Objects
