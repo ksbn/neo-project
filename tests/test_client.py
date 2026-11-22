@@ -10,10 +10,12 @@ import time
 from collections.abc import Iterator
 from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any, cast
 
 import pytest
 import requests
 import responses
+from requests.adapters import HTTPAdapter
 from responses import matchers
 
 from client import (
@@ -23,14 +25,13 @@ from client import (
     NasaApiError,
     NeoWsClient,
     _CappedRetry,
-    date_chunks,
 )
 from conftest import make_feed, make_neo
 from errors import (
     FeedContractError,
     UpstreamAuthError,
-    UpstreamError,
     UpstreamRateLimited,
+    UpstreamRequestError,
     UpstreamUnavailable,
 )
 
@@ -62,7 +63,7 @@ def test_valid_payload_sends_key_in_header_not_url(client):
         ],
     )
     assert client.get_feed(D1, D2)["element_count"] == 1
-    assert "test-key" not in responses.calls[0].request.url
+    assert "test-key" not in str(responses.calls[0].request.url)
 
 
 @responses.activate
@@ -80,8 +81,8 @@ def test_empty_api_key_is_rejected():
 @responses.activate
 def test_fetch_records_returns_validated_records(client):
     responses.get(FEED, json=make_feed({"2026-11-10": [make_neo("1")]}))
-    (record,) = client.fetch_records(D1, D2).records
-    assert record.neo_reference_id == "1"
+    (obs,) = client.fetch_records(D1, D2).observations
+    assert obs.neo_reference_id == "1"
 
 
 @responses.activate
@@ -122,9 +123,10 @@ def test_http_403_is_an_auth_error_without_retrying(client):
 @responses.activate
 def test_http_400_uses_neows_error_message(client):
     responses.get(FEED, status=400, json={"code": 400, "error_message": "Date Format Exception"})
-    with pytest.raises(UpstreamError, match="HTTP 400: Date Format Exception") as exc:
+    with pytest.raises(UpstreamRequestError, match="HTTP 400: Date Format Exception") as exc:
         client.get_feed(D1, D2)
-    assert type(exc.value) is UpstreamError  # neither retryable nor an auth problem
+    assert exc.value.status_code == 400
+    assert len(responses.calls) == 1  # a rejected request is not retried
 
 
 @responses.activate
@@ -186,7 +188,7 @@ def test_retry_after_is_capped():
 
 def test_retries_apply_to_http_and_https(client):
     for url in ("https://example.test", "http://example.test"):
-        assert isinstance(client._session.get_adapter(url).max_retries, _CappedRetry)
+        assert isinstance(_adapter(client, url).max_retries, _CappedRetry)
 
 
 def test_every_failure_is_still_a_nasa_api_error():
@@ -197,7 +199,7 @@ def test_every_failure_is_still_a_nasa_api_error():
 
 def test_interactive_profile_retries_once_and_ignores_retry_after():
     with NeoWsClient("k", profile=INTERACTIVE) as c:
-        retry = c._session.get_adapter(BASE_URL).max_retries
+        retry = _adapter(c, BASE_URL).max_retries
         assert retry.total == 1
         assert retry.respect_retry_after_header is False
         assert c._timeout == INTERACTIVE.timeout
@@ -225,7 +227,7 @@ def slow_server() -> Iterator[tuple[str, list[int]]]:
     hits: list[int] = []
 
     class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *args):  # keep test output quiet
+        def log_message(self, format: str, *args: Any) -> None:  # keep test output quiet
             pass
 
         def do_GET(self):
@@ -267,9 +269,16 @@ def test_inverted_range_rejected(client):
         client.get_feed(D2, D1)
 
 
-def test_date_chunks_split_long_ranges():
-    assert list(date_chunks(date(2026, 11, 1), date(2026, 11, 15))) == [
-        (date(2026, 11, 1), date(2026, 11, 7)),
-        (date(2026, 11, 8), date(2026, 11, 14)),
-        (date(2026, 11, 15), date(2026, 11, 15)),
-    ]
+def test_client_declares_the_neows_window_limit(client):
+    assert client.max_window_days == 7
+
+
+@responses.activate
+def test_user_agent_identifies_the_caller():
+    responses.get(FEED, json=EMPTY, match=[matchers.header_matcher({"User-Agent": "neo-dashboard/1.0"})])
+    with NeoWsClient("k", user_agent="neo-dashboard/1.0") as c:
+        c.get_feed(D1, D2)
+
+
+def _adapter(client: NeoWsClient, url: str) -> HTTPAdapter:
+    return cast(HTTPAdapter, client._session.get_adapter(url))

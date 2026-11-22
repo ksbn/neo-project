@@ -3,7 +3,7 @@
 import pytest
 
 from config import DbConfig, Settings
-from errors import ConfigError, ExitCode
+from errors import ConfigError
 
 DB = {"DB_NAME": "neo", "DB_USER": "u", "DB_PASSWORD": "secret"}
 
@@ -17,9 +17,8 @@ def test_db_defaults_and_password_hidden_from_repr():
 @pytest.mark.parametrize("missing", ["DB_NAME", "DB_USER", "DB_PASSWORD"])
 def test_missing_db_setting_is_a_config_error(missing):
     env = {k: v for k, v in DB.items() if k != missing}
-    with pytest.raises(ConfigError, match=missing) as exc:
+    with pytest.raises(ConfigError, match=missing):
         Settings(env).db()
-    assert exc.value.exit_code == ExitCode.CONFIG_ERROR
 
 
 def test_non_integer_port_is_a_config_error():
@@ -42,5 +41,6 @@ def test_settings_validate_lazily():
         settings.db()
 
 
-def test_config_error_is_still_a_value_error():
-    assert issubclass(ConfigError, ValueError)
+def test_config_error_is_not_a_value_error():
+    """A stray `except ValueError` (programmer-bug territory) must not swallow configuration problems."""
+    assert not issubclass(ConfigError, ValueError)

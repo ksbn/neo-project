@@ -16,7 +16,9 @@ from client import BASE_URL, NeoWsClient
 from config import Settings
 from conftest import make_feed, make_neo
 from database import AsteroidRepository
-from pipeline import ExitCode, main, parse_args
+from errors import NeoError, StorageError
+from ingest import DryRunStore
+from pipeline import CLI_OUTCOMES, ExitCode, main, outcome, parse_args
 
 FEED = f"{BASE_URL}/feed"
 ENV = {"NASA_API_KEY": "test-key", "DB_HOST": "127.0.0.1", "DB_NAME": "x", "DB_USER": "x", "DB_PASSWORD": "x"}
@@ -146,7 +148,9 @@ def test_missing_nasa_key_exits_1_even_for_a_dry_run():
 
 def test_programmer_errors_are_not_swallowed():
     class BrokenFeed:
-        def fetch_records(self, start, end):
+        max_window_days = 7
+
+        def fetch_records(self, start_date, end_date):
             raise KeyError("bug")
 
     with pytest.raises(KeyError):
@@ -167,3 +171,37 @@ def test_missing_day_in_response_is_warned(caplog):
 def count(store_factory) -> int:
     with store_factory(None) as store:
         return store.count()
+
+
+@responses.activate
+def test_rejected_request_is_not_reported_as_an_outage():
+    responses.get(FEED, status=400, json={"code": 400, "error_message": "Date Format Exception"})
+    assert run(["--start", "2026-11-01", "--dry-run"]) == ExitCode.CONTRACT_ERROR
+
+
+@responses.activate
+def test_failing_final_count_does_not_turn_success_into_an_error(caplog):
+    class CountFails(DryRunStore):
+        def count(self) -> int:
+            raise StorageError("connection lost")
+
+    responses.get(FEED, json=make_feed({"2026-11-01": [make_neo("1", "2026-11-01")]}))
+    assert run(["--start", "2026-11-01"], open_store=lambda settings: nullcontext(CountFails())) == ExitCode.OK
+    assert "Could not count stored asteroids" in caplog.text
+
+
+def test_every_error_class_maps_to_an_outcome():
+    """The handler can never crash on a missing exit code, whatever subclass is raised."""
+
+    class BrandNew(NeoError):
+        pass
+
+    def subclasses(kind):
+        for sub in kind.__subclasses__():
+            yield sub
+            yield from subclasses(sub)
+
+    for kind in [BrandNew, *(k for k in subclasses(NeoError) if k.__module__ == "errors"), NeoError]:
+        code, label = outcome(kind("x"))
+        assert isinstance(code, ExitCode) and label
+    assert outcome(BrandNew("x")) == CLI_OUTCOMES[NeoError]

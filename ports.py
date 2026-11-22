@@ -1,31 +1,42 @@
-"""Structural interfaces the application services depend on.
+"""Structural interfaces between the application services and the adapters.
 
 These are ``typing.Protocol``s, so the concrete adapters (``NeoWsClient``,
-``AsteroidRepository``) satisfy them without inheriting anything, and tests
-can pass small fakes.
+``AsteroidRepository``) and the test fakes satisfy them without inheriting
+anything. Pyright checks the conformance in CI (see ``tests/test_ports.py``).
+Only ``domain`` types appear here, so no port depends on an adapter module.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import date
-from typing import TYPE_CHECKING, Protocol
+from typing import Protocol
 
-if TYPE_CHECKING:
-    from database import UpsertResult
-    from domain import AsteroidRecord
-    from models import ParseResult
+from domain import AsteroidSummary, FeedBatch, Observation, Overview, UpsertResult
 
 
 class FeedSource(Protocol):
-    """Produces validated records for one window of at most 7 days."""
+    """Produces validated observations for one window."""
 
-    def fetch_records(self, start_date: date, end_date: date) -> ParseResult: ...
+    @property
+    def max_window_days(self) -> int:
+        """Longest window ``fetch_records`` accepts."""
+        ...
+
+    def fetch_records(self, start_date: date, end_date: date) -> FeedBatch: ...
 
 
 class AsteroidStore(Protocol):
-    """Persists records idempotently."""
+    """Persists observations idempotently (write side)."""
 
-    def upsert_many(self, records: Sequence[AsteroidRecord]) -> UpsertResult: ...
+    def save(self, observations: Sequence[Observation]) -> UpsertResult: ...
 
     def count(self) -> int: ...
+
+
+class AsteroidReader(Protocol):
+    """Answers the dashboard's questions (read side)."""
+
+    def overview(self) -> Overview: ...
+
+    def list_recent(self, limit: int) -> list[AsteroidSummary]: ...

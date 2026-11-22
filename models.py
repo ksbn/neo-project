@@ -4,32 +4,33 @@ Two layers of models:
 
 * **Raw models** (``NearEarthObject`` and its children) mirror the JSON returned
   by ``/feed``. Numeric strings such as ``"12.345"`` are coerced to ``Decimal``.
-* :func:`to_record` maps them onto the domain :class:`domain.AsteroidRecord`,
-  which maps 1:1 onto the ``asteroids`` table defined in ``db/migrations``.
+* :func:`to_observation` maps them onto the domain's :class:`domain.Observation`
+  (an :class:`domain.Asteroid` plus its :class:`domain.CloseApproach`).
 
 This module is the anti-corruption layer for NASA's payload: nothing outside it
 knows the raw JSON shape, and a malformed envelope surfaces as
 :class:`errors.FeedContractError` rather than a pydantic exception.
 
 ``parse_feed`` validates each asteroid independently, so one malformed object
-is reported and skipped instead of failing the whole batch.
+is reported and skipped instead of failing the whole batch. It does *not*
+de-duplicate: deciding which approach wins is the domain's job (:func:`domain.latest`).
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from domain import AsteroidRecord
+import domain
+from domain import Asteroid, FeedBatch, InvalidObject, Observation
 from errors import FeedContractError
 
-__all__ = ["AsteroidRecord", "InvalidObject", "ParseResult", "parse_feed", "to_record"]
+__all__ = ["parse_feed", "to_observation"]
 
 logger = logging.getLogger(__name__)
 
@@ -138,11 +139,11 @@ class FeedResponse(_IngestModel):
 # --------------------------------------------------------------------------- #
 
 
-def to_record(neo: NearEarthObject, feed_date: date) -> AsteroidRecord:
-    """Flatten a validated NEO, using its close approach for ``feed_date``."""
+def to_observation(neo: NearEarthObject, feed_date: date) -> Observation:
+    """Map a validated NEO onto the domain, using its close approach for ``feed_date``."""
     km = neo.estimated_diameter.kilometers if neo.estimated_diameter else None
-    approach = neo.approach_nearest(feed_date)
-    return AsteroidRecord(
+    raw_approach = neo.approach_nearest(feed_date)
+    asteroid = Asteroid(
         neo_reference_id=neo.neo_reference_id,
         name=neo.name,
         nasa_jpl_url=neo.nasa_jpl_url,
@@ -151,11 +152,18 @@ def to_record(neo: NearEarthObject, feed_date: date) -> AsteroidRecord:
         estimated_diameter_max_km=km.estimated_diameter_max if km else None,
         is_potentially_hazardous=neo.is_potentially_hazardous_asteroid,
         is_sentry_object=neo.is_sentry_object,
-        close_approach_date=approach.close_approach_date if approach else None,
-        relative_velocity_km_s=approach.relative_velocity.kilometers_per_second if approach else None,
-        miss_distance_km=approach.miss_distance.kilometers if approach else None,
-        orbiting_body=approach.orbiting_body if approach else None,
     )
+    approach = (
+        domain.CloseApproach(  # not the raw DTO of the same name below
+            close_approach_date=raw_approach.close_approach_date,
+            relative_velocity_km_s=raw_approach.relative_velocity.kilometers_per_second,
+            miss_distance_km=raw_approach.miss_distance.kilometers,
+            orbiting_body=raw_approach.orbiting_body,
+        )
+        if raw_approach
+        else None
+    )
+    return Observation(asteroid=asteroid, approach=approach)
 
 
 # --------------------------------------------------------------------------- #
@@ -163,44 +171,15 @@ def to_record(neo: NearEarthObject, feed_date: date) -> AsteroidRecord:
 # --------------------------------------------------------------------------- #
 
 
-@dataclass(frozen=True)
-class InvalidObject:
-    """An asteroid that failed validation and was skipped."""
-
-    feed_date: date
-    neo_reference_id: str | None
-    error: str
-
-
-@dataclass(frozen=True)
-class ParseResult:
-    """Outcome of :func:`parse_feed`."""
-
-    records: list[AsteroidRecord] = field(default_factory=list)
-    invalid: list[InvalidObject] = field(default_factory=list)
-    element_count: int = 0
-    # Dates present as keys in near_earth_objects (used to detect missing days).
-    feed_dates: frozenset[date] = frozenset()
-
-
 def _summarize(exc: ValidationError) -> str:
     """Compact one-line summary of a ValidationError, e.g. ``name: Field required``."""
     return "; ".join(f"{'.'.join(map(str, err['loc'])) or '<root>'}: {err['msg']}" for err in exc.errors())
 
 
-def _is_newer(candidate: AsteroidRecord, current: AsteroidRecord) -> bool:
-    """True if ``candidate`` describes a later (or equal) close approach than ``current``."""
-    if candidate.close_approach_date is None:
-        return current.close_approach_date is None
-    return current.close_approach_date is None or candidate.close_approach_date >= current.close_approach_date
+def parse_feed(payload: Mapping[str, Any]) -> FeedBatch:
+    """Validate a raw ``/feed`` payload into domain observations, in feed-date order.
 
-
-def parse_feed(payload: Mapping[str, Any]) -> ParseResult:
-    """Validate a raw ``/feed`` payload and flatten it into database records.
-
-    The same asteroid may appear under several dates in one feed; it is
-    de-duplicated, keeping its most recent close approach (matching the
-    one-row-per-asteroid table design).
+    The same asteroid may appear under several dates; every appearance is kept.
 
     Raises:
         FeedContractError: If the response envelope itself is malformed.
@@ -210,7 +189,7 @@ def parse_feed(payload: Mapping[str, Any]) -> ParseResult:
     except ValidationError as exc:
         raise FeedContractError(f"NeoWs /feed response did not match the expected format: {_summarize(exc)}") from exc
 
-    latest: dict[str, AsteroidRecord] = {}
+    observations: list[Observation] = []
     invalid: list[InvalidObject] = []
     seen = 0
 
@@ -224,16 +203,13 @@ def parse_feed(payload: Mapping[str, Any]) -> ParseResult:
                 invalid.append(InvalidObject(feed_date, str(ref) if ref is not None else None, _summarize(exc)))
                 continue
 
-            record = to_record(neo, feed_date)
-            current = latest.get(record.neo_reference_id)
-            if current is None or _is_newer(record, current):
-                latest[record.neo_reference_id] = record
+            observations.append(to_observation(neo, feed_date))
 
     if seen != feed.element_count:
         logger.warning("Feed element_count is %d but %d objects were present", feed.element_count, seen)
 
-    return ParseResult(
-        records=list(latest.values()),
+    return FeedBatch(
+        observations=observations,
         invalid=invalid,
         element_count=seen,
         feed_dates=frozenset(feed.near_earth_objects),

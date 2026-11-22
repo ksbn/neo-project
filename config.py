@@ -52,11 +52,6 @@ class DbConfig:
             password=env["DB_PASSWORD"],
         )
 
-    @classmethod
-    def from_env(cls) -> Self:
-        """Shortcut for ``Settings.load().db()``."""
-        return Settings.load().db()
-
 
 @dataclass(frozen=True)
 class Settings:

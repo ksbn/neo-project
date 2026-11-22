@@ -14,12 +14,13 @@ import re
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, LiteralString, cast
 
 import psycopg
 import pytest
+from psycopg import sql
 
-from config import DbConfig
+from config import DbConfig, Settings
 from database import connect
 from errors import ConfigError, StorageError
 
@@ -86,21 +87,22 @@ def migration_up_sql() -> list[str]:
 def db_schema() -> Iterator[tuple[DbConfig, str]]:
     """A throwaway schema with all migrations applied; dropped after the session."""
     try:
-        cfg = DbConfig.from_env()
+        cfg = Settings.load().db()
         admin = connect(cfg, connect_timeout=3, autocommit=True)
     except (ConfigError, StorageError) as exc:
         pytest.skip(f"PostgreSQL not available (start it with `docker compose up -d`): {exc}")
 
     name = f"test_{uuid.uuid4().hex[:8]}"
     with admin:
-        admin.execute(f'CREATE SCHEMA "{name}"')
+        schema = sql.Identifier(name)
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(schema))
         try:
-            admin.execute(f'SET search_path TO "{name}"')
+            admin.execute(sql.SQL("SET search_path TO {}").format(schema))
             for up_sql in migration_up_sql():
-                admin.execute(up_sql)
+                admin.execute(cast(LiteralString, up_sql))  # trusted: files from db/migrations in this repo
             yield cfg, name
         finally:
-            admin.execute(f'DROP SCHEMA "{name}" CASCADE')
+            admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(schema))
 
 
 @pytest.fixture

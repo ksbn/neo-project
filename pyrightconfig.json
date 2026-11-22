@@ -1,0 +1,7 @@
+{
+  "include": ["*.py", "tests"],
+  "exclude": ["venv", ".venv", "**/__pycache__"],
+  "pythonVersion": "3.14",
+  "typeCheckingMode": "standard",
+  "executionEnvironments": [{ "root": "tests", "extraPaths": ["."] }]
+}
