@@ -118,9 +118,11 @@ def test_inspector_payload_uses_the_latest_pass_or_today():
 
     row = AsteroidSummary("2524522", "Zoozve", 0.2, 0.45, True, PASS, 6_019_000.0, 9.5)
     with_pass = viewport_payload(LOOKUP, "Zoozve", row, "cached", today=date(2026, 11, 22))
+    assert with_pass is not None
     assert with_pass["earth"]["approach_date"] == "2026-11-02" and with_pass["sun"]["date"] == "2026-11-02"
 
     only_alerted = viewport_payload(LOOKUP, "Zoozve", None, "cached", today=date(2026, 11, 22))
+    assert only_alerted is not None
     assert only_alerted["earth"] is None and only_alerted["sun"]["date"] == "2026-11-22"
     assert only_alerted["hazardous"] is False
 
