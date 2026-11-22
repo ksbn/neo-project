@@ -25,7 +25,7 @@ from planetary_defense.application.enrich_orbit import OrbitEnricher
 from planetary_defense.config import Settings
 from planetary_defense.domain.anomaly_rules import default_rules
 from planetary_defense.domain.errors import StorageError, UpstreamError
-from planetary_defense.domain.models import ApproachSummary, AsteroidView, CachedOrbit, OrbitLookup
+from planetary_defense.domain.models import ApproachSummary, AsteroidView, CachedOrbit, OrbitLookup, OrbitOrigin
 from planetary_defense.infrastructure.db import connect
 from planetary_defense.infrastructure.error_boundary import CircuitBreaker, GuardedOrbitSource
 from planetary_defense.infrastructure.nasa_client import INTERACTIVE, NeoWsClient
@@ -120,6 +120,22 @@ def orbit_lookup(neo_reference_id: str) -> OrbitLookup:
             return enricher.lookup(neo_reference_id)
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def cached_orbits(neo_reference_ids: tuple[str, ...]) -> dict[str, OrbitLookup]:
+    """Cache-only orbit reads for the viewport's context arcs (best effort: {} if the cache is unreadable)."""
+    found: dict[str, OrbitLookup] = {}
+    try:
+        with _connect() as conn:
+            repo = OrbitRepository(conn)
+            for ref in neo_reference_ids:
+                cached = repo.get_orbit(ref)
+                if cached is not None:
+                    found[ref] = OrbitLookup(cached.orbit, cached.fetched_at, OrbitOrigin.CACHE)
+    except StorageError:
+        return {}
+    return found
+
+
 class LiveDashboard:
     """:class:`DashboardData` over PostgreSQL first and NASA as the fallback."""
 
@@ -145,6 +161,9 @@ class LiveDashboard:
     def orbit(self, neo_reference_id: str) -> OrbitLookup:
         return orbit_lookup(neo_reference_id)
 
+    def cached_orbits(self, neo_reference_ids: list[str]) -> dict[str, OrbitLookup]:
+        return cached_orbits(tuple(neo_reference_ids))
+
     def sync(self) -> SyncReport:
         """Run the pipeline for the last 3 days, exactly as the scheduled job does, with quick NASA retries."""
         from planetary_defense.cli import main as run_pipeline  # the batch entry point, reused as-is
@@ -161,7 +180,7 @@ class LiveDashboard:
         return SyncReport(ok=ok, message=message)
 
     def refresh(self) -> None:
-        for cached in (database_view, nasa_view, approach_history, orbit_lookup):
+        for cached in (database_view, nasa_view, approach_history, orbit_lookup, cached_orbits):
             cached.clear()
         get_settings.clear()
         for breaker in breakers().values():
@@ -173,18 +192,12 @@ class LiveDashboard:
 # --------------------------------------------------------------------------- #
 
 
-def render_sidebar(result: LoadResult, data: DashboardData) -> None:
-    with st.sidebar:
-        st.header("Data source")
-        if result.source:
-            st.success(result.source)
-        if st.button("Refresh data"):
-            data.refresh()
-            st.rerun()
-        if result.diagnostics:
-            with st.expander("Diagnostics", expanded=result.source is None):
-                for msg in result.diagnostics:
-                    st.caption(msg)
+def render_diagnostics(result: LoadResult) -> None:
+    """Why a data source was skipped; expanded when nothing could be loaded."""
+    if result.diagnostics:
+        with st.expander(f"Diagnostics · data source: {result.source or 'none'}", expanded=result.source is None):
+            for msg in result.diagnostics:
+                st.caption(msg)
 
 
 def render_status(view: AsteroidView) -> None:
@@ -197,29 +210,35 @@ def render_status(view: AsteroidView) -> None:
         getattr(st, health.level)(health.text)
 
 
+def panel_title(text: str) -> None:
+    st.html(f'<div class="astraea-panel-title">{text} <span class="chev">⌃</span></div>')
+
+
 def render(data: DashboardData) -> None:
     st.set_page_config(page_title="ASTRAEA: Planetary Defense Command", page_icon="🛰️", layout="wide")
     theme.apply()
 
     result = data.load()
     command_header.render(result, data)
-    render_sidebar(result, data)
     if result.view is None:
         st.warning(
             "Unable to fetch asteroid data from the database or the NASA API right now. "
-            "Check the Diagnostics panel in the sidebar for details."
+            "Check Diagnostics below for details."
         )
+        render_diagnostics(result)
         return
 
     view = result.view
     kpi_strip.render(view)
     render_status(view)
     left, right = st.columns([5, 6], gap="medium")
-    with left:
+    with left, st.container(border=True):
+        panel_title("Asteroid Hazard Alerts &amp; Close Approaches")
         hazard_alerts.render(view)
         approach_table.render(view)
     with right:
         orbit_stage.render(view, data)
+    render_diagnostics(result)
 
 
 def main() -> None:

@@ -28,7 +28,7 @@ def to_frame(rows: list[AsteroidSummary]) -> pd.DataFrame:
     """The table's rows, in display units (LD, metres)."""
     return pd.DataFrame({
         "neo_reference_id": [r.neo_reference_id for r in rows],
-        "Object Name": [r.name for r in rows],
+        "Object Name": [f"● {r.name}" for r in rows],
         "Date (UTC)": [r.close_approach_date for r in rows],
         DISTANCE: [km_to_ld(r.miss_distance_km) if r.miss_distance_km is not None else None for r in rows],
         "Velocity (km/s)": [r.relative_velocity_km_s for r in rows],
@@ -37,18 +37,22 @@ def to_frame(rows: list[AsteroidSummary]) -> pd.DataFrame:
     })
 
 
+TIER_STYLES = {
+    "critical": f"background-color: {PALETTE['critical']}; color: #ffffff; font-weight: 700",
+    "warning": f"background-color: {PALETTE['watch']}; color: #1b1300; font-weight: 700",
+    "nominal": "background-color: #12343d; color: #8fe8df",
+}
+
+
 def _tier_style(ld: float | None) -> str:
+    """Colour-filled distance cells: red < 1 LD, amber 1-5 LD, teal otherwise."""
     tier = distance_tier(ld)
-    if tier == "critical":
-        return f"color: {PALETTE['critical']}; font-weight: 700"
-    if tier == "warning":
-        return f"color: {PALETTE['warning']}; font-weight: 600"
-    return f"color: {PALETTE['nominal']}" if tier else ""
+    return TIER_STYLES[tier] if tier else ""
 
 
 def render(view: AsteroidView) -> pd.DataFrame:
     """Draws the table and returns the rows left after filtering."""
-    st.subheader("Close Approach Data")
+    st.html('<div class="astraea-panel-title">Close Approach Data Table <span class="chev">⌃</span></div>')
     search, hazardous = st.columns([3, 2], vertical_alignment="bottom")
     query = search.text_input("Search by name", "", placeholder="Search by name", label_visibility="collapsed")
     hazardous_only = hazardous.checkbox("Hazardous only")
@@ -68,7 +72,7 @@ def render(view: AsteroidView) -> pd.DataFrame:
         styled,
         hide_index=True,
         width="stretch",
-        height=380,
+        height=330,
         key=TABLE_KEY,
         on_select=on_row_selected(TABLE_KEY, list(df["neo_reference_id"])),
         selection_mode="single-row",

@@ -26,16 +26,19 @@ def metrics(at: AppTest) -> dict[str, str]:
 
 
 def page_html(at: AppTest) -> str:
-    return "\n".join(h.proto.body for h in at.get("html"))
+    """Everything rendered as HTML: st.html blocks and iframe documents (KPI strip, 3D viewport)."""
+    blocks = [h.proto.body for h in at.get("html")] + [f.proto.srcdoc for f in at.get("iframe")]
+    return "\n".join(blocks)
 
 
 def test_kpi_strip_has_the_four_cards_from_stored_data():
     text = page_html(run())
-    for title in ("Threat Level", "Near-Earth Objects", "Close Approaches (±3 days)", "Global Defense Readiness"):
+    for title in ("Threat Level:", "Near-Earth Objects (NEOs)", "Close Approaches (24h):", "Global Defense Readiness:"):
         assert title in text
     assert ">3<" in text  # tracked NEOs
-    assert text.count('<i title="') == 5  # the approaches-per-day sparkline, one bar per day
-    assert "NOMINAL" in text and "Last sync 2026-11-22 08:00 UTC" in text
+    assert "<polyline" in text  # the approaches-per-day sparkline
+    assert "Guarded (Level 3)" in text  # worst alert within +-7 days of the fake's dates is a watch
+    assert "Operational (Green)" in text and "Last sync: 2026-11-22 08:00 UTC" in text
 
 
 def test_healthy_runs_need_no_banner_and_hazard_alerts_filter():
@@ -43,7 +46,7 @@ def test_healthy_runs_need_no_banner_and_hazard_alerts_filter():
     assert not at.main.success  # the readiness card shows the healthy state instead
     text = page_html(at)
     assert "WARNING" in text and "WATCH" in text and "Classified by NASA" not in text  # info hidden by default
-    assert "2026-11-02 UTC" in text and "≤ 450 m" in text  # pass time and estimated size on the card
+    assert "<b>11-02</b>UTC" in text and "≤450 m" in text  # pass time and estimated size on the row
 
     at.selectbox(key="alert_floor").set_value(Severity.INFO).run()
     assert "Classified by NASA" in page_html(at)
@@ -54,7 +57,7 @@ def test_healthy_runs_need_no_banner_and_hazard_alerts_filter():
 def test_close_approach_table_has_the_spec_columns_in_display_units():
     at = run()
     table = at.dataframe[0].value
-    assert list(table["Object Name"]) == ["524522 Zoozve (2002 VE68)", "(2019 BG3)", "(2001 KF54)"]
+    assert list(table["Object Name"]) == ["● 524522 Zoozve (2002 VE68)", "● (2019 BG3)", "● (2001 KF54)"]
     assert table["Distance (LD)"].iloc[0] == pytest.approx(6_019_000 / LUNAR_DISTANCE_KM)
     assert table["Diameter (m)"].iloc[0] == pytest.approx(450.0)
 
@@ -63,7 +66,7 @@ def test_stage_opens_on_the_most_urgent_alert_with_telemetry():
     at = run()
     assert at.selectbox(key="selected_neo_id").value == "2524522"
     text = page_html(at)
-    assert "Inclination" in text and "9.037°" in text  # from the cached orbit
+    assert "Inclination (deg)" in text and "9.037°" in text  # from the cached orbit
     assert "15.65 LD · 6,019,000 km" in text  # minimum Earth distance
     assert "Live Feed" in text and "Data Synced 08:00 UTC" in text and "Orbit: cache" in text
 
@@ -77,7 +80,7 @@ def test_track_button_and_picker_change_the_tracked_asteroid():
     assert payload["name"] == "(2019 BG3)" and payload["hazardous"] is False
 
     at.selectbox(key="selected_neo_id").set_value("a").run()
-    assert "ID a" in page_html(at)
+    assert "<span>Object ID</span><span>a</span>" in page_html(at)
 
 
 def test_orbit_failure_falls_back_to_an_approximate_pass():
@@ -98,7 +101,7 @@ def test_live_fallback_mode_says_so_and_hides_history():
 def test_no_data_at_all_shows_a_warning_and_diagnostics():
     at = run(empty=True)
     assert any("Unable to fetch asteroid data" in w.value for w in at.warning)
-    assert [c.value for c in at.sidebar.caption] == ["PostgreSQL database: unavailable", "NASA: unavailable"]
+    assert [c.value for c in at.main.caption][-2:] == ["PostgreSQL database: unavailable", "NASA: unavailable"]
 
 
 def viewport_payloads(at: AppTest) -> list[dict]:

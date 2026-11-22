@@ -268,6 +268,11 @@ class FakeDashboard:
         return OrbitLookup(replace(zoozve_orbit(), neo_reference_id=neo_reference_id),
                            datetime(2026, 11, 20, 8, 0, tzinfo=UTC), OrbitOrigin.CACHE)
 
+    def cached_orbits(self, neo_reference_ids: list[str]) -> dict[str, OrbitLookup]:
+        if self.orbit_fails:
+            return {}
+        return {ref: self.orbit(ref) for ref in neo_reference_ids}
+
     def refresh(self) -> None:
         self.refreshed += 1
 

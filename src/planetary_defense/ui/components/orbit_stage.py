@@ -26,12 +26,44 @@ from planetary_defense.ui.messages import describe, orbit_status
 from planetary_defense.ui.state import SELECTED, ensure_selection
 from planetary_defense.ui.theme import PALETTE
 
-VIEWPORT_HEIGHT = 560
+VIEWPORT_HEIGHT = 470
+MAX_CONTEXT_ARCS = 5
 HISTORY_COLUMNS = list(ApproachSummary.__dataclass_fields__)
 
 
+def context_arcs(
+    view: AsteroidView, selected: str, orbits: dict[str, OrbitLookup], limit: int = MAX_CONTEXT_ARCS
+) -> list[tuple[str, bool, Any]]:
+    """Approach arcs of other asteroids whose orbits are cached: alert asteroids first, then the closest passes."""
+    rows = {r.neo_reference_id: r for r in view.rows}
+    arcs = []
+    for ref in context_candidates(view, selected):
+        row, lookup = rows.get(ref), orbits.get(ref)
+        if lookup is None or row is None or row.close_approach_date is None or not row.miss_distance_km:
+            continue
+        trajectory = earth_view_from(lookup, row.close_approach_date, km_to_ld(row.miss_distance_km),
+                                     window_days=4).trajectory
+        arcs.append((row.name, row.is_potentially_hazardous, trajectory))
+        if len(arcs) == limit:
+            break
+    return arcs
+
+
+def context_candidates(view: AsteroidView, selected: str, limit: int = 12) -> list[str]:
+    by_alert = [a.neo_reference_id for a in view.alerts]
+    by_distance = [r.neo_reference_id for r in sorted(
+        (r for r in view.rows if r.miss_distance_km), key=lambda r: r.miss_distance_km or 0.0)]
+    ordered = [ref for ref in dict.fromkeys(by_alert + by_distance) if ref != selected]
+    return ordered[:limit]
+
+
 def viewport_payload(
-    lookup: OrbitLookup | None, name: str, row: AsteroidSummary | None, provenance: str, today: date
+    lookup: OrbitLookup | None,
+    name: str,
+    row: AsteroidSummary | None,
+    provenance: str,
+    today: date,
+    context: list[tuple[str, bool, Any]] | None = None,
 ) -> dict[str, Any] | None:
     """What the viewport draws, or None when there is nothing to draw.
 
@@ -45,27 +77,24 @@ def viewport_payload(
         on = pass_date if pass_date is not None and miss_km else today
         trajectory = earth_view_from(lookup, on, km_to_ld(miss_km)).trajectory if pass_date and miss_km else None
         return orbital_3d.build_payload(name=name, hazardous=hazardous, provenance=provenance,
-                                        trajectory=trajectory, sun=sun_view_from(lookup, on))
+                                        trajectory=trajectory, sun=sun_view_from(lookup, on), context=context)
     if pass_date is not None and miss_km and row is not None and row.relative_velocity_km_s is not None:
         trajectory = straight_line_flyby(pass_date, km_to_ld(miss_km), row.relative_velocity_km_s)
         return orbital_3d.build_payload(name=name, hazardous=hazardous, provenance=provenance,
-                                        trajectory=trajectory, sun=None, approximate=True)
+                                        trajectory=trajectory, sun=None, approximate=True, context=context)
     return None
 
 
-def _readout(key: str, value: str) -> str:
-    return f'<div class="astraea-readout"><div class="k">{key}</div><div class="v">{value}</div></div>'
+def _row(key: str, value: str) -> str:
+    return f'<div class="row"><span>{key}</span><span>{value}</span></div>'
 
 
 def _dot(color: str) -> str:
     return f'<span class="astraea-dot" style="color:{color};background:{color}"></span>'
 
 
-def telemetry_html(
-    neo_id: str, name: str, row: AsteroidSummary | None, lookup: OrbitLookup | None, view: AsteroidView,
-    orbit_error: str | None,
-) -> str:
-    """The readouts strip and status line. Every NASA-derived string is escaped."""
+def telemetry_html(neo_id: str, name: str, row: AsteroidSummary | None, lookup: OrbitLookup | None) -> str:
+    """The readouts: a name tile and two columns of key/value rows. NASA-derived text is escaped."""
     el = lookup.orbit.elements if lookup else None
     moid = lookup.orbit.moid_au if lookup else None
     dash = "—"
@@ -76,19 +105,25 @@ def telemetry_html(
         diameter = dash
     miss = (f"{km_to_ld(row.miss_distance_km):.2f} LD · {row.miss_distance_km:,.0f} km"
             if row is not None and row.miss_distance_km else dash)
-    readouts = [
-        _readout("Object", f"{html.escape(name)}<br><span style='color:{PALETTE['muted']}'>ID {html.escape(neo_id)}"
-                           "</span>"),
-        _readout("Inclination", f"{el.inclination_deg:.3f}°" if el else dash),
-        _readout("Eccentricity", f"{el.eccentricity:.4f}" if el else dash),
-        _readout("Semi-major axis", f"{el.semi_major_axis_au:.4f} AU" if el else dash),
-        _readout("Abs. magnitude H",
-                 f"{row.absolute_magnitude_h:.2f}" if row is not None and row.absolute_magnitude_h else dash),
-        _readout("Diameter (est.)", diameter),
-        _readout("Min. Earth distance", miss),
-        _readout("Earth MOID", f"{au_to_ld(moid):.2f} LD" if moid is not None else dash),
+    left = [
+        _row("Object ID", html.escape(neo_id)),
+        _row("Inclination (deg)", f"{el.inclination_deg:.3f}°" if el else dash),
+        _row("Eccentricity", f"{el.eccentricity:.4f}" if el else dash),
+        _row("Diameter (est.)", diameter),
     ]
+    right = [
+        _row("Semi-Major Axis (AU)", f"{el.semi_major_axis_au:.4f}" if el else dash),
+        _row("Absolute Magnitude", f"{row.absolute_magnitude_h:.2f}" if row is not None and row.absolute_magnitude_h
+             else dash),
+        _row("Minimum Earth Distance (LD/km)", miss),
+        _row("Earth MOID (LD)", f"{au_to_ld(moid):.2f}" if moid is not None else dash),
+    ]
+    return (f'<div class="astraea-telemetry"><div class="name">{html.escape(name)}</div>'
+            f'<div class="rows">{"".join(left)}</div><div class="rows">{"".join(right)}</div></div>')
 
+
+def status_html(view: AsteroidView, lookup: OrbitLookup | None, orbit_error: str | None) -> str:
+    """The footer status bar: Live Feed / Data Synced / orbit source (with error states)."""
     feed_ok = view.history_available
     synced = view.status.last_success_at if view.status else None
     if orbit_error:
@@ -98,14 +133,14 @@ def telemetry_html(
     else:
         origin = lookup.origin.value.replace("_", " ") if lookup else "none"
         orbit_state, orbit_color = f"Orbit: {origin}", PALETTE["nominal"]
-    status = (
-        f'<b>{_dot(PALETTE["nominal"] if feed_ok else PALETTE["watch"])}'
-        f'{"Live Feed" if feed_ok else "NASA Fallback"}</b>'
-        f'<b>{_dot(PALETTE["nominal"] if synced else PALETTE["watch"])}'
-        f'{"Data Synced " + f"{synced.astimezone(UTC):%H:%M} UTC" if synced else "Not synced"}</b>'
-        f"<b>{_dot(orbit_color)}{orbit_state}</b>"
+    synced_text = f"Data Synced {synced.astimezone(UTC):%H:%M} UTC" if synced else "Not synced"
+    return (
+        '<div class="astraea-footer">'
+        f"<span>{_dot(PALETTE['nominal'] if feed_ok else PALETTE['watch'])}"
+        f"{'Live Feed' if feed_ok else 'NASA Fallback'}</span>"
+        f"<span>⟳ {synced_text}</span>"
+        f"<span>{_dot(orbit_color)}{orbit_state}</span></div>"
     )
-    return f'<div class="astraea-readouts">{"".join(readouts)}</div><div class="astraea-status">{status}</div>'
 
 
 def _choices(view: AsteroidView) -> dict[str, str]:
@@ -115,39 +150,48 @@ def _choices(view: AsteroidView) -> dict[str, str]:
 
 
 def render(view: AsteroidView, data: DashboardData) -> str | None:
-    """Draws the stage and returns the tracked asteroid's id."""
-    st.subheader("3D Space Viewport")
+    """Draws the viewport and telemetry panels and returns the tracked asteroid's id."""
     names = _choices(view)
     if not names:
         st.caption("Nothing to track yet.")
         return None
     ensure_selection(view, list(names))
-    neo_id = st.selectbox("Tracking", list(names), key=SELECTED, label_visibility="collapsed",
-                          format_func=lambda ref: f"Tracking: {names[ref]} ({ref})")
-    if neo_id is None:
-        return None
-    row = next((r for r in view.rows if r.neo_reference_id == neo_id), None)
     now = datetime.now(UTC)
 
-    lookup: OrbitLookup | None = None
-    orbit_error: str | None = None
-    try:
-        lookup = data.orbit(neo_id)
-    except NeoError as exc:
-        orbit_error = describe(exc)
-    provenance = orbit_status(lookup, now) if lookup else f"Orbit unavailable: {orbit_error}"
+    with st.container(border=True):
+        title, picker = st.columns([2, 3], vertical_alignment="center")
+        with title:
+            st.html('<div class="astraea-panel-title" style="border:0;margin:0">3D Space Viewport</div>')
+        with picker:
+            neo_id = st.selectbox("Tracking", list(names), key=SELECTED, label_visibility="collapsed",
+                                  format_func=lambda ref: f"Tracking: {names[ref]} ({ref})")
+        if neo_id is None:
+            return None
+        row = next((r for r in view.rows if r.neo_reference_id == neo_id), None)
 
-    payload = viewport_payload(lookup, names[neo_id], row, provenance, now.date())
-    if payload is not None:
-        orbital_3d.render(payload, height=VIEWPORT_HEIGHT)
-    if orbit_error:
-        fallback = " Showing an approximate straight-line pass instead." if payload else ""
-        st.warning(f"Orbit unavailable: {orbit_error}{fallback}")
-    elif lookup is not None and lookup.note:
-        st.caption(lookup.note)
+        lookup: OrbitLookup | None = None
+        orbit_error: str | None = None
+        try:
+            lookup = data.orbit(neo_id)
+        except NeoError as exc:
+            orbit_error = describe(exc)
+        provenance = orbit_status(lookup, now) if lookup else f"Orbit unavailable: {orbit_error}"
+        context = context_arcs(view, neo_id, data.cached_orbits(context_candidates(view, neo_id)))
 
-    st.html(telemetry_html(neo_id, names[neo_id], row, lookup, view, orbit_error))
+        payload = viewport_payload(lookup, names[neo_id], row, provenance, now.date(), context=context)
+        if payload is not None:
+            orbital_3d.render(payload, height=VIEWPORT_HEIGHT)
+        if orbit_error:
+            fallback = " Showing an approximate straight-line pass instead." if payload else ""
+            st.warning(f"Orbit unavailable: {orbit_error}{fallback}")
+        elif lookup is not None and lookup.note:
+            st.caption(lookup.note)
 
+    with st.container(border=True):
+        st.html('<div class="astraea-panel-title">Orbital Telemetry Readouts <span class="chev">⌄</span></div>')
+        st.html(telemetry_html(neo_id, names[neo_id], row, lookup))
+
+    st.html(status_html(view, lookup, orbit_error))
     with st.expander("Alerts & approach history"):
         for alert in (a for a in view.alerts if a.neo_reference_id == neo_id):
             st.markdown(f"- **{alert.severity.name.title()}** ({alert.close_approach_date}): {alert.message}")

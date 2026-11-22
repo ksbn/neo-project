@@ -14,20 +14,21 @@ import streamlit as st
 from planetary_defense.domain.models import Severity
 
 PALETTE: Final = {
-    "bg": "#070b14",
-    "panel": "#0f1626",
-    "border": "#1f2a40",
-    "text": "#d7dde8",
-    "muted": "#8b95a7",
-    "accent": "#4da3ff",
-    "nominal": "#3ddc97",
-    "watch": "#f5c542",
-    "warning": "#ff9f43",
-    "critical": "#ff4d4f",
+    "bg": "#081219",
+    "panel": "#0f1e29",
+    "panel_hi": "#132634",
+    "border": "#1f3a4a",
+    "text": "#dbe7ee",
+    "muted": "#8ea3b0",
+    "accent": "#3fd0c9",
+    "nominal": "#3ddc84",
+    "watch": "#f2c94c",
+    "warning": "#f2994a",
+    "critical": "#eb5757",
 }
 
 SEVERITY_COLORS: Final = {
-    Severity.INFO: PALETTE["accent"],
+    Severity.INFO: "#8fb8c9",
     Severity.WATCH: PALETTE["watch"],
     Severity.WARNING: PALETTE["warning"],
     Severity.CRITICAL: PALETTE["critical"],
@@ -36,45 +37,58 @@ SEVERITY_COLORS: Final = {
 MONO: Final = "'JetBrains Mono', 'SFMono-Regular', Menlo, Consolas, monospace"
 
 CSS: Final = f"""
-.block-container {{ padding-top: 1.2rem; padding-bottom: 1.5rem; max-width: 1600px; }}
-[data-testid="stHeader"] {{ background: transparent; }}
-h1, h2, h3 {{ letter-spacing: 0.02em; }}
-h3 {{ font-size: 0.95rem !important; text-transform: uppercase; color: {PALETTE["muted"]} !important;
-      font-family: {MONO}; font-weight: 600 !important; }}
-[data-testid="stDataFrame"] {{ border: 1px solid {PALETTE["border"]}; border-radius: 6px; }}
+.stApp {{ background: radial-gradient(1200px 600px at 50% -10%, #11283a 0%, {PALETTE["bg"]} 60%); }}
+.block-container {{ padding-top: 0.8rem; padding-bottom: 1rem; max-width: 1680px; }}
+[data-testid="stHeader"] {{ background: transparent; height: 0; }}
+[data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"] {{ display: none; }}
+[data-testid="stVerticalBlockBorderWrapper"] {{ background: {PALETTE["panel"]}; border-radius: 8px;
+                                               border-color: {PALETTE["border"]} !important; }}
+[data-testid="stDataFrame"] {{ border-radius: 6px; }}
+.astraea-panel-title {{ display: flex; justify-content: space-between; align-items: center; font-weight: 700;
+                        font-size: 0.86rem; letter-spacing: 0.04em; text-transform: uppercase; color: {PALETTE["text"]};
+                        padding-bottom: 6px; border-bottom: 1px solid {PALETTE["border"]}; margin-bottom: 4px; }}
+.astraea-panel-title .chev {{ color: {PALETTE["muted"]}; font-weight: 400; }}
+.astraea-subtitle {{ display: grid; grid-template-columns: 1fr 70px 96px 70px; gap: 8px; font-size: 0.78rem;
+                     font-weight: 700; text-transform: uppercase; color: {PALETTE["text"]}; padding: 2px 10px; }}
+.astraea-subtitle span:not(:first-child) {{ text-transform: none; font-weight: 500; color: {PALETTE["muted"]};
+                                            text-align: center; }}
 .astraea-header {{ display: flex; align-items: center; justify-content: space-between; gap: 16px;
                    padding: 10px 16px; border: 1px solid {PALETTE["border"]}; border-radius: 8px;
-                   background: linear-gradient(90deg, #0d1a33, {PALETTE["panel"]}); }}
-.astraea-title {{ font-family: {MONO}; font-size: 1.15rem; font-weight: 700; letter-spacing: 0.06em;
-                  color: {PALETTE["text"]}; }}
-.astraea-title span {{ color: {PALETTE["accent"]}; }}
-.astraea-pill {{ font-family: {MONO}; font-size: 0.75rem; color: {PALETTE["muted"]};
-                 border: 1px solid {PALETTE["border"]}; border-radius: 999px; padding: 4px 12px;
-                 white-space: nowrap; }}
-.astraea-dot {{ display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px;
-                vertical-align: middle; box-shadow: 0 0 6px currentColor; }}
-.astraea-card {{ border: 1px solid {PALETTE["border"]}; border-radius: 8px; background: {PALETTE["panel"]};
-                 padding: 12px 14px; height: 100%; min-height: 138px; box-sizing: border-box; }}
-.astraea-card .label {{ font-family: {MONO}; font-size: 0.7rem; text-transform: uppercase;
-                        letter-spacing: 0.08em; color: {PALETTE["muted"]}; }}
-.astraea-card .value {{ font-family: {MONO}; font-size: 1.6rem; font-weight: 700; margin: 4px 0 2px; }}
-.astraea-card .sub {{ font-size: 0.78rem; color: {PALETTE["muted"]}; }}
+                   background: linear-gradient(90deg, #0e2232, {PALETTE["panel"]}); }}
+.astraea-title {{ font-size: 1.5rem; color: {PALETTE["text"]}; letter-spacing: 0.01em; }}
+.astraea-title b {{ font-weight: 800; }}
+.astraea-profile {{ display: flex; align-items: center; gap: 10px; padding: 4px 12px 4px 4px;
+                    border: 1px solid {PALETTE["border"]}; border-radius: 8px; background: {PALETTE["panel_hi"]}; }}
+.astraea-avatar {{ width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center;
+                   background: linear-gradient(135deg, #2b6777, #173a48); color: {PALETTE["text"]};
+                   font-weight: 700; font-size: 0.8rem; }}
+.astraea-profile .who {{ font-size: 0.86rem; color: {PALETTE["text"]}; line-height: 1.1; }}
+.astraea-profile .when {{ font-family: {MONO}; font-size: 0.7rem; color: {PALETTE["muted"]}; }}
+.astraea-profile .chev {{ color: {PALETTE["muted"]}; margin-left: 6px; }}
+.astraea-dot {{ display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px;
+                vertical-align: middle; box-shadow: 0 0 8px currentColor; }}
 .astraea-badge {{ display: inline-block; font-family: {MONO}; font-size: 0.68rem; font-weight: 700;
                   letter-spacing: 0.06em; padding: 2px 8px; border-radius: 4px; text-transform: uppercase; }}
-.astraea-alert {{ border-left: 3px solid; border-radius: 4px; background: {PALETTE["panel"]};
-                  padding: 8px 10px; margin-bottom: 2px; }}
-.astraea-alert .name {{ font-weight: 600; }}
-.astraea-alert .meta {{ font-family: {MONO}; font-size: 0.72rem; color: {PALETTE["muted"]}; }}
-.astraea-spark {{ display: flex; align-items: flex-end; gap: 2px; height: 26px; margin: 2px 0 4px; }}
-.astraea-spark i {{ flex: 1; max-width: 8px; border-radius: 1px; opacity: 0.85; }}
-.astraea-readouts {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }}
-.astraea-readout {{ border: 1px solid {PALETTE["border"]}; border-radius: 6px; padding: 8px 10px;
-                    background: {PALETTE["panel"]}; }}
-.astraea-readout .k {{ font-family: {MONO}; font-size: 0.66rem; text-transform: uppercase;
-                       letter-spacing: 0.08em; color: {PALETTE["muted"]}; }}
-.astraea-readout .v {{ font-family: {MONO}; font-size: 0.95rem; font-weight: 600; margin-top: 2px; }}
-.astraea-status {{ font-family: {MONO}; font-size: 0.72rem; color: {PALETTE["muted"]}; margin-top: 8px; }}
-.astraea-status b {{ color: {PALETTE["text"]}; font-weight: 600; margin-right: 14px; }}
+.astraea-alert {{ display: grid; grid-template-columns: 26px 1fr 70px 96px 70px; gap: 8px; align-items: center;
+                  border-left: 4px solid; border-radius: 4px; background: {PALETTE["panel_hi"]};
+                  padding: 7px 10px; margin: 2px 0; }}
+.astraea-alert .icon {{ font-size: 1.1rem; text-align: center; }}
+.astraea-alert .label {{ font-weight: 700; font-size: 0.86rem; }}
+.astraea-alert .why {{ font-size: 0.78rem; color: {PALETTE["text"]}; }}
+.astraea-alert .cell {{ font-family: {MONO}; font-size: 0.74rem; color: {PALETTE["muted"]}; text-align: center;
+                        line-height: 1.25; }}
+.astraea-alert .cell b {{ color: {PALETTE["text"]}; font-weight: 600; display: block; }}
+.astraea-telemetry {{ display: grid; grid-template-columns: 150px 1fr 1fr; gap: 10px; align-items: stretch; }}
+.astraea-telemetry .name {{ display: grid; place-items: center; border: 1px solid {PALETTE["border"]};
+                            border-radius: 6px; background: {PALETTE["panel_hi"]}; font-size: 1.15rem;
+                            font-weight: 600; text-align: center; padding: 8px; }}
+.astraea-telemetry .rows {{ display: grid; gap: 2px; }}
+.astraea-telemetry .row {{ display: flex; justify-content: space-between; gap: 10px; padding: 4px 8px;
+                           border-radius: 4px; background: {PALETTE["panel_hi"]}; font-size: 0.84rem; }}
+.astraea-telemetry .row span:last-child {{ font-family: {MONO}; color: {PALETTE["text"]}; text-align: right; }}
+.astraea-footer {{ display: flex; justify-content: flex-end; gap: 22px; padding: 8px 4px 0;
+                   font-size: 0.84rem; color: {PALETTE["text"]}; border-top: 1px solid {PALETTE["border"]};
+                   margin-top: 6px; }}
 """
 
 

@@ -173,6 +173,10 @@ class DashboardData(Protocol):
         """Raises NeoError (usually OrbitUnavailable) when no orbit can be shown."""
         ...
 
+    def cached_orbits(self, neo_reference_ids: list[str]) -> dict[str, OrbitLookup]:
+        """Orbits already in the local cache, for context arcs; never calls NASA, never raises."""
+        ...
+
     def refresh(self) -> None: ...
 
     def sync(self) -> SyncReport:

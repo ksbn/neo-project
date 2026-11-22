@@ -128,15 +128,26 @@ def test_inspector_payload_uses_the_latest_pass_or_today():
 
 
 
-def test_sparkline_bars_scale_to_the_largest_value():
-    import re
+def test_sparkline_scales_values_into_the_box():
+    from planetary_defense.ui.components.kpi_strip import sparkline_svg
 
-    from planetary_defense.ui.components.kpi_strip import sparkline_bars
+    svg = sparkline_svg([1, 5, 3], width=100, height=20)
+    points = [tuple(map(float, p.split(","))) for p in svg.split('<polyline points="')[1].split('"')[0].split()]
+    assert [x for x, _ in points] == [0.0, 50.0, 100.0]
+    assert min(y for _, y in points) == 3.0 and max(y for _, y in points) == 17.0  # 3 px margins
+    assert "<line" in sparkline_svg([4])  # one point: a flat line, no division by zero
 
-    heights = [int(h) for h in re.findall(r"height:(\d+)%", sparkline_bars([1, 5, 10]))]
-    assert heights == [10, 50, 100]
-    assert re.findall(r"height:(\d+)%", sparkline_bars([0, 4])) == ["8", "100"]  # a zero day still shows a stub
-    assert "<i" not in sparkline_bars([])
+
+def test_context_arcs_use_only_cached_orbits_of_other_asteroids():
+    from planetary_defense.ui.components.orbit_stage import context_arcs, context_candidates
+
+    from fakes import control_room_view
+
+    view = control_room_view()
+    candidates = context_candidates(view, selected="2524522")
+    assert "2524522" not in candidates and candidates[:2] == ["b", "a"]  # alert asteroids first
+    arcs = context_arcs(view, "2524522", {"a": LOOKUP})  # only 'a' has a cached orbit
+    assert [name for name, _, _ in arcs] == ["(2001 KF54)"]
 
 
 

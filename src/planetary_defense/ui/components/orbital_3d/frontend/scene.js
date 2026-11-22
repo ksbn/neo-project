@@ -3,11 +3,15 @@
 // Payload positions are in the J2000 ecliptic frame (x towards the March equinox, z towards the
 // ecliptic pole). three.js is y-up, so the ecliptic is drawn as the horizontal plane:
 // (x, y, z) -> (x, z, -y).
+//
+// Earth view: distances from Earth are compressed (logarithmic) so Earth, the Moon's 1 LD ring and
+// asteroids tens of LD away fit on one screen; directions are kept. The legend says so.
 
 const payload = JSON.parse(document.getElementById("payload").textContent);
 const viewport = document.getElementById("viewport");
 const legend = document.getElementById("legend");
 const notice = document.getElementById("notice");
+const TEXTURES = "__TEXTURE_BASE__";
 
 function showNotice(message) {
   notice.textContent = message;
@@ -24,19 +28,15 @@ try {
   throw error;
 }
 
-const COLORS = {
-  earth: 0x3d8bff,
-  moonRing: 0x9aa4b5,
-  scaleRing: 0x2b3446,
-  sun: 0xffd166,
-  asteroid: payload.hazardous ? 0xff5a4f : 0xffb347,
-  closest: 0xffffff,
-};
-
+const PALETTE = { teal: 0x3fd0c9, ring: 0x6fe3ff, selected: payload.hazardous ? 0xff6b3d : 0xffa24a };
+const CONTEXT_COLORS = [0xf2c94c, 0xf2994a, 0x9b8cff, 0x56ccf2, 0x6fcf97, 0xff7aa2];
 const ecl = ([x, y, z]) => new THREE.Vector3(x, z, -y);
+const fmt = (value, digits = 2) => Number(value).toFixed(digits);
+const escapeHtml = (text) =>
+  String(text).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
 // --------------------------------------------------------------------------- //
-// Renderer, camera, controls
+// Renderer, camera, controls, background
 // --------------------------------------------------------------------------- //
 
 let renderer;
@@ -47,11 +47,12 @@ try {
   throw error;
 }
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-renderer.setClearColor(0x05070d);
+renderer.setClearColor(0x040a10);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
 viewport.prepend(renderer.domElement);
 
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(45, 1, 0.001, 1e6);
+const camera = new THREE.PerspectiveCamera(42, 1, 0.01, 5000);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 
@@ -66,53 +67,104 @@ function resize() {
 new ResizeObserver(resize).observe(viewport);
 resize();
 
+function starfield(count = 1800, radius = 900) {
+  const positions = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    const v = new THREE.Vector3().randomDirection().multiplyScalar(radius * (0.6 + Math.random() * 0.4));
+    positions.set([v.x, v.y, v.z], i * 3);
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  return new THREE.Points(geometry, new THREE.PointsMaterial({ color: 0x9fb7c8, size: 1.2, sizeAttenuation: false }));
+}
+scene.add(starfield());
+scene.add(new THREE.AmbientLight(0xffffff, 0.35));
+const sunlight = new THREE.DirectionalLight(0xffffff, 2.2);
+scene.add(sunlight);
+
 // --------------------------------------------------------------------------- //
 // Drawing helpers
 // --------------------------------------------------------------------------- //
 
+const loader = new THREE.TextureLoader();
+loader.setCrossOrigin("anonymous");
+function texture(file, onLoad) {
+  loader.load(`${TEXTURES}${file}`, (tex) => { tex.colorSpace = THREE.SRGBColorSpace; onLoad(tex); }, undefined, () => {});
+}
+
 function line(points, color, { dashed = false, opacity = 1 } = {}) {
   const geometry = new THREE.BufferGeometry().setFromPoints(points);
   const material = dashed
-    ? new THREE.LineDashedMaterial({ color, dashSize: 0.6, gapSize: 0.4, transparent: true, opacity })
+    ? new THREE.LineDashedMaterial({ color, dashSize: 0.12, gapSize: 0.08, transparent: true, opacity })
     : new THREE.LineBasicMaterial({ color, transparent: opacity < 1, opacity });
   const object = new THREE.Line(geometry, material);
   if (dashed) object.computeLineDistances();
   return object;
 }
 
-function ring(radius, color, opacity = 1, segments = 160) {
+function ringPoints(radius, segments = 180) {
   const points = [];
   for (let i = 0; i <= segments; i++) {
     const a = (i / segments) * Math.PI * 2;
     points.push(new THREE.Vector3(radius * Math.cos(a), 0, radius * Math.sin(a)));
   }
-  return line(points, color, { opacity });
+  return points;
 }
 
-function sphere(radius, color, emissive = false) {
-  const material = emissive
-    ? new THREE.MeshBasicMaterial({ color })
-    : new THREE.MeshStandardMaterial({ color, roughness: 0.6, metalness: 0.1 });
-  return new THREE.Mesh(new THREE.SphereGeometry(radius, 32, 16), material);
+// A glowing tube: a bright core and a soft, additive halo.
+function glowTube(points, color, core, halo, haloOpacity) {
+  const group = new THREE.Group();
+  const curve = new THREE.CatmullRomCurve3(points);
+  const segments = Math.min(points.length * 3, 600);
+  group.add(new THREE.Mesh(new THREE.TubeGeometry(curve, segments, core, 8, false),
+    new THREE.MeshBasicMaterial({ color })));
+  group.add(new THREE.Mesh(new THREE.TubeGeometry(curve, segments, halo, 8, false),
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: haloOpacity, blending: THREE.AdditiveBlending,
+                                  depthWrite: false })));
+  return group;
 }
 
-// A text label that stays the same size on screen. `place` puts it beside, above or below its
-// anchor in screen space, so labels of nearby points don't overlap however the view is turned.
-function label(text, color = "#d7dde8", place = "right") {
+function glowRing(radius, color, core, halo) {
+  const group = new THREE.Group();
+  const flat = (mesh) => { mesh.rotation.x = Math.PI / 2; return mesh; };
+  group.add(flat(new THREE.Mesh(new THREE.TorusGeometry(radius, core, 12, 220), new THREE.MeshBasicMaterial({ color }))));
+  group.add(flat(new THREE.Mesh(new THREE.TorusGeometry(radius, halo, 12, 220),
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.18, blending: THREE.AdditiveBlending,
+                                  depthWrite: false }))));
+  return group;
+}
+
+function rock(radius) {
+  return new THREE.Mesh(new THREE.IcosahedronGeometry(radius, 1),
+    new THREE.MeshStandardMaterial({ color: 0x8b8580, roughness: 0.95, flatShading: true }));
+}
+
+// A text label that stays the same size on screen; `boxed` draws the outlined callout.
+function label(text, color = "#dbe7ee", place = "right", boxed = false) {
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d");
   const font = "500 28px system-ui, sans-serif";
   ctx.font = font;
-  canvas.width = Math.ceil(ctx.measureText(text).width) + 16;
-  canvas.height = 40;
+  const pad = boxed ? 18 : 8;
+  canvas.width = Math.ceil(ctx.measureText(text).width) + pad * 2;
+  canvas.height = boxed ? 52 : 40;
   ctx.font = font;
+  if (boxed) {
+    ctx.fillStyle = "rgba(8, 20, 30, 0.85)";
+    ctx.strokeStyle = "rgba(111, 227, 255, 0.55)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.roundRect(1, 1, canvas.width - 2, canvas.height - 2, 8);
+    ctx.fill();
+    ctx.stroke();
+  }
   ctx.fillStyle = color;
   ctx.textBaseline = "middle";
-  ctx.fillText(text, 8, 20);
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.colorSpace = THREE.SRGBColorSpace;
-  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, depthTest: false, sizeAttenuation: false }));
-  const height = 0.035;
+  ctx.fillText(text, pad, canvas.height / 2);
+  const map = new THREE.CanvasTexture(canvas);
+  map.colorSpace = THREE.SRGBColorSpace;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map, depthTest: false, sizeAttenuation: false }));
+  const height = boxed ? 0.042 : 0.032;
   sprite.scale.set((height * canvas.width) / canvas.height, height, 1);
   const centers = { right: [0, 0.5], above: [0.5, -0.6], below: [0.5, 1.6], left: [1, 0.5] };
   sprite.center.set(...centers[place]);
@@ -120,82 +172,118 @@ function label(text, color = "#d7dde8", place = "right") {
   return sprite;
 }
 
-function extentOf(points) {
-  return points.reduce((max, p) => Math.max(max, p.length()), 0);
+// --------------------------------------------------------------------------- //
+// Earth-centred view (compressed lunar distances)
+// --------------------------------------------------------------------------- //
+
+const EARTH_R = 1;
+const displayRadius = (ld) => EARTH_R + 0.9 * Math.log1p(1.7 * ld);
+function toDisplay(p) {
+  const v = ecl(p);
+  const d = v.length();
+  return d === 0 ? v : v.multiplyScalar(displayRadius(d) / d);
 }
-
-const fmt = (value, digits = 2) => Number(value).toFixed(digits);
-const escapeHtml = (text) =>
-  String(text).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-
-// --------------------------------------------------------------------------- //
-// Earth-centred close approach (lunar distances)
-// --------------------------------------------------------------------------- //
 
 function buildEarthView(e) {
   const group = new THREE.Group();
-  const path = e.path.map(ecl);
-  const closest = ecl(e.closest);
-  const extent = Math.max(extentOf(path), 1.5);
 
-  // Earth is ~0.017 LD across; enlarge it so it stays visible, and say by how much.
-  const earthRadius = Math.max(extent * 0.02, 0.12);
-  group.add(sphere(earthRadius, COLORS.earth));
-  const earthLabel = label("Earth (enlarged)", "#9cc7ff", "above");
-  earthLabel.position.set(0, earthRadius, 0);
-  group.add(earthLabel);
+  // Earth with clouds and a thin atmosphere glow; plain colours until the textures arrive.
+  const earth = new THREE.Mesh(new THREE.SphereGeometry(EARTH_R, 64, 32),
+    new THREE.MeshStandardMaterial({ color: 0x2b6cb0, roughness: 0.9 }));
+  texture("earth_atmos_2048.jpg", (map) => {
+    earth.material.map = map;
+    earth.material.color.set(0xffffff);
+    earth.material.needsUpdate = true;
+  });
+  const clouds = new THREE.Mesh(new THREE.SphereGeometry(EARTH_R * 1.012, 64, 32),
+    new THREE.MeshStandardMaterial({ transparent: true, opacity: 0, depthWrite: false }));
+  texture("earth_clouds_1024.png", (map) => {
+    clouds.material.map = map;
+    clouds.material.opacity = 0.8;
+    clouds.material.needsUpdate = true;
+  });
+  const atmosphere = new THREE.Mesh(new THREE.SphereGeometry(EARTH_R * 1.08, 48, 24),
+    new THREE.MeshBasicMaterial({ color: PALETTE.ring, transparent: true, opacity: 0.12, side: THREE.BackSide,
+                                  blending: THREE.AdditiveBlending, depthWrite: false }));
+  group.add(earth, clouds, atmosphere);
 
-  group.add(ring(1, COLORS.moonRing, 0.9));
-  const moonLabel = label("1 LD (Moon)", "#b8c1d1", "left");
-  moonLabel.position.set(-1.05, 0, 0);
+  // The Moon's distance: a glowing 1 LD ring with the Moon on it (the Moon's real position isn't modelled).
+  const moonOrbit = displayRadius(1);
+  group.add(glowRing(moonOrbit, PALETTE.ring, 0.018, 0.07));
+  const moon = new THREE.Mesh(new THREE.SphereGeometry(0.24, 48, 24),
+    new THREE.MeshStandardMaterial({ color: 0xb8b8b8, roughness: 1 }));
+  texture("moon_1024.jpg", (map) => {
+    moon.material.map = map;
+    moon.material.color.set(0xffffff);
+    moon.material.needsUpdate = true;
+  });
+  const moonAngle = -0.35;
+  moon.position.set(moonOrbit * Math.cos(moonAngle), 0, moonOrbit * Math.sin(moonAngle));
+  group.add(moon);
+  const moonLabel = label("Moon", "#e6eef3", "below");
+  moonLabel.position.copy(moon.position).add(new THREE.Vector3(0, -0.3, 0));
   group.add(moonLabel);
+  const ldLabel = label("1 LUNAR DISTANCE (LD)", "#e6eef3", "right", true);
+  ldLabel.position.set(moonOrbit * Math.cos(1.0), 0, moonOrbit * Math.sin(1.0));
+  group.add(ldLabel);
 
-  for (const r of [5, 10, 20, 50, 100, 200]) {
-    if (r > 1.5 && r < extent * 1.25) {
-      group.add(ring(r, COLORS.scaleRing, 0.9));
-      const ringLabel = label(`${r} LD`, "#5d687d");
-      ringLabel.position.set(r * Math.SQRT1_2, 0, r * Math.SQRT1_2);
-      group.add(ringLabel);
-    }
+  // Faint scale rings so compressed distances can still be read.
+  for (const ld of [10, 50]) {
+    group.add(line(ringPoints(displayRadius(ld)), 0x2a4a5a, { opacity: 0.6 }));
+    const ringLabel = label(`${ld} LD`, "#6f8a99", "right");
+    ringLabel.position.set(displayRadius(ld) * Math.cos(2.4), 0, displayRadius(ld) * Math.sin(2.4));
+    group.add(ringLabel);
   }
 
-  group.add(line(path, COLORS.asteroid));
-  const end = path[path.length - 1];
-  const before = path[Math.max(path.length - 4, 0)];
-  const direction = end.clone().sub(before).normalize();
-  group.add(new THREE.ArrowHelper(direction, end, extent * 0.08, COLORS.asteroid, extent * 0.04, extent * 0.025));
+  // Other asteroids with cached orbits: thinner glowing arcs, labelled at their end.
+  let extent = moonOrbit + 0.5;
+  (payload.context || []).forEach((c, i) => {
+    const points = c.path.map(toDisplay);
+    extent = Math.max(extent, ...points.map((p) => p.length()));
+    const color = CONTEXT_COLORS[i % CONTEXT_COLORS.length];
+    group.add(glowTube(points, color, 0.012, 0.04, 0.22));
+    const body = rock(0.07);
+    body.position.copy(toDisplay(c.closest));
+    group.add(body);
+    const tag = label(c.name, `#${color.toString(16).padStart(6, "0")}`, "above");
+    tag.position.copy(points[points.length - 1]);
+    group.add(tag);
+  });
 
-  group.add(line([new THREE.Vector3(), closest], COLORS.closest, { dashed: true, opacity: 0.8 }));
-  const marker = sphere(Math.max(extent * 0.008, 0.05), COLORS.closest, true);
-  marker.position.copy(closest);
-  group.add(marker);
-  const missLabel = label(`${fmt(e.miss_ld)} LD on ${e.approach_date}`, "#ffffff", "below");
+  // The tracked asteroid: a brighter, thicker arc, its closest point, and a moving body.
+  const path = e.path.map(toDisplay);
+  extent = Math.max(extent, ...path.map((p) => p.length()));
+  group.add(glowTube(path, PALETTE.selected, 0.025, 0.085, 0.3));
+  const closest = toDisplay(e.closest);
+  group.add(line([new THREE.Vector3(), closest], 0xffffff, { dashed: true, opacity: 0.7 }));
+  const closestMark = new THREE.Mesh(new THREE.SphereGeometry(0.05, 16, 8), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+  closestMark.position.copy(closest);
+  group.add(closestMark);
+  const missLabel = label(`${payload.name} · ${fmt(e.miss_ld)} LD on ${e.approach_date}`, "#ffd2a1", "below");
   missLabel.position.copy(closest);
   group.add(missLabel);
-
-  // A body moving along the drawn path, so the direction of motion is obvious.
-  const body = sphere(Math.max(extent * 0.012, 0.07), COLORS.asteroid, true);
+  const body = rock(0.11);
   group.add(body);
 
-  const enlargement = Math.round(earthRadius / e.earth_radius_ld);
+  const note = payload.approximate
+    ? "No orbit available: straight-line pass at NASA's distance and speed; direction illustrative."
+    : `NASA ${fmt(e.miss_ld)} LD · orbit model ${fmt(e.model_miss_ld)} LD.`;
+  // Frame Earth, the Moon's ring and the tracked pass; longer context arcs may run off screen.
+  const frame = Math.max(moonOrbit + 0.6, closest.length() * 1.05);
   return {
     group,
-    radius: extent,
+    radius: frame,
+    extent,
+    distance: 2.1,
+    camera: new THREE.Vector3(0.12, 0.3, 1).normalize(),
     animate(t) {
-      const i = Math.floor((t / 8000) * path.length) % path.length;
-      body.position.copy(path[i]);
+      earth.rotation.y = t * 0.00004;
+      clouds.rotation.y = t * 0.00005;
+      body.position.copy(path[Math.floor((t / 9000) * path.length) % path.length]);
     },
-    legendHtml: `
-      <h3>${escapeHtml(payload.name)}</h3>
-      <p><span class="swatch" style="background:#${COLORS.asteroid.toString(16)}"></span>
-         Path ${e.window_days} days either side of the pass on ${e.approach_date}</p>
-      <p>Closest approach drawn at NASA's ${fmt(e.miss_ld)} LD
-         ${payload.approximate ? "" : `<span class="muted">(orbit model alone: ${fmt(e.model_miss_ld)} LD)</span>`}</p>
-      ${payload.approximate ? `<p style="color:#f5c542">No orbit available: a straight-line pass at NASA's distance
-         and speed. The direction is illustrative.</p>` : ""}
-      <p class="muted">Earth-centred, J2000 ecliptic plane, lunar distances (1 LD = 1/389 AU).
-         Earth enlarged about ${enlargement}x; the path is to scale and approximate.</p>
-      <p class="muted">${escapeHtml(payload.provenance)}</p>`,
+    legendHtml: `<b>${escapeHtml(payload.name)}</b> · pass ${e.approach_date} · ${note}
+      <span class="muted">Distances from Earth compressed (log scale) for readability; directions are true.
+      ${escapeHtml(payload.provenance)}</span>`,
   };
 }
 
@@ -207,51 +295,45 @@ function buildSunView(s) {
   const group = new THREE.Group();
   const asteroidPath = s.asteroid_path.map(ecl);
   const earthPath = s.earth_path.map(ecl);
-  const extent = Math.max(extentOf(asteroidPath), extentOf(earthPath));
+  const extent = Math.max(...asteroidPath.map((p) => p.length()), ...earthPath.map((p) => p.length()));
 
-  group.add(sphere(extent * 0.03, COLORS.sun, true));
-  const gridRadius = Math.ceil(extent * 2) / 2; // next 0.5 AU
-  group.add(new THREE.PolarGridHelper(gridRadius, 12, gridRadius * 2, 96, 0x1c2433, 0x1c2433));
+  const sun = new THREE.Mesh(new THREE.SphereGeometry(extent * 0.035, 32, 16), new THREE.MeshBasicMaterial({ color: 0xffd166 }));
+  const corona = new THREE.Mesh(new THREE.SphereGeometry(extent * 0.07, 32, 16),
+    new THREE.MeshBasicMaterial({ color: 0xffb703, transparent: true, opacity: 0.25, blending: THREE.AdditiveBlending,
+                                  depthWrite: false }));
+  group.add(sun, corona);
+  const gridRadius = Math.ceil(extent * 2) / 2;
+  group.add(new THREE.PolarGridHelper(gridRadius, 12, gridRadius * 2, 96, 0x173040, 0x173040));
+  group.add(glowTube(earthPath, 0x56a8f5, extent * 0.004, extent * 0.012, 0.25));
+  group.add(glowTube(asteroidPath, PALETTE.selected, extent * 0.004, extent * 0.012, 0.25));
 
-  group.add(line(earthPath, COLORS.earth));
-  group.add(line(asteroidPath, COLORS.asteroid));
-
-  const earth = sphere(extent * 0.018, COLORS.earth);
+  const earth = new THREE.Mesh(new THREE.SphereGeometry(extent * 0.02, 32, 16), new THREE.MeshStandardMaterial({ color: 0x3d8bff }));
   earth.position.copy(ecl(s.earth));
-  group.add(earth);
+  const asteroid = rock(extent * 0.016);
+  asteroid.position.copy(ecl(s.asteroid));
+  group.add(earth, asteroid);
   const earthLabel = label("Earth", "#9cc7ff", "above");
   earthLabel.position.copy(earth.position);
-  group.add(earthLabel);
-
-  const asteroid = sphere(extent * 0.014, COLORS.asteroid, true);
-  asteroid.position.copy(ecl(s.asteroid));
-  group.add(asteroid);
   const asteroidLabel = label(payload.name, "#ffd2a1", "below");
   asteroidLabel.position.copy(asteroid.position);
-  group.add(asteroidLabel);
+  group.add(earthLabel, asteroidLabel);
 
   return {
     group,
     radius: extent,
+    extent,
+    distance: 2.35,
+    camera: new THREE.Vector3(0.9, 0.75, 1.1).normalize(),
     animate() {},
-    legendHtml: `
-      <h3>${escapeHtml(payload.name)}</h3>
-      <p><span class="swatch" style="background:#${COLORS.asteroid.toString(16)}"></span>Orbit
-         ${s.orbit_class ? `(class ${escapeHtml(s.orbit_class)})` : ""}
-         <span class="swatch" style="background:#3d8bff;margin-left:8px"></span>Earth's orbit</p>
-      <p>Positions on ${s.date}</p>
-      <p class="muted">Sun-centred, J2000 ecliptic, astronomical units. Sun and planets enlarged.</p>
-      <p class="muted">${escapeHtml(payload.provenance)}</p>`,
+    legendHtml: `<b>${escapeHtml(payload.name)}</b> · orbit${s.orbit_class ? ` (class ${escapeHtml(s.orbit_class)})` : ""}
+      and Earth's, positions on ${s.date} · <span class="muted">Sun-centred, astronomical units, to scale;
+      Sun and planets enlarged. ${escapeHtml(payload.provenance)}</span>`,
   };
 }
 
 // --------------------------------------------------------------------------- //
-// Modes, camera per mode, render loop
+// Modes, camera per mode, toolbar, render loop
 // --------------------------------------------------------------------------- //
-
-scene.add(new THREE.AmbientLight(0xffffff, 0.55));
-const sunlight = new THREE.PointLight(0xffffff, 2.5, 0, 0);
-scene.add(sunlight);
 
 const views = {};
 if (payload.earth) views.earth = buildEarthView(payload.earth);
@@ -264,15 +346,12 @@ for (const view of Object.values(views)) {
 const savedCameras = {};
 let mode = null;
 
-// Frame the drawn content (paths, orbits), not helpers such as the grid.
 function fitCamera(view) {
   const radius = Math.max(view.radius, 0.5);
-  const direction = new THREE.Vector3(0.9, 0.75, 1.1).normalize();
   controls.target.set(0, 0, 0);
-  // A 45 degree field of view needs ~2.6 radii to show a sphere; 3 leaves a margin for labels.
-  camera.position.copy(direction.multiplyScalar(radius * 3));
-  camera.near = radius / 1000;
-  camera.far = radius * 100;
+  camera.position.copy(view.camera.clone().multiplyScalar(radius * view.distance));
+  camera.near = radius / 500;
+  camera.far = Math.max(radius, view.extent) * 400;
   camera.updateProjectionMatrix();
   controls.update();
 }
@@ -286,9 +365,9 @@ function setMode(next) {
   mode = next;
   const view = views[mode];
   view.group.visible = true;
-  // Light from the Sun's direction: the origin in the Sun view, roughly "behind" Earth in the Earth view.
-  const awayFromSun = payload.sun ? ecl(payload.sun.earth).negate().normalize() : new THREE.Vector3(1, 0.4, 0.6);
-  sunlight.position.copy(mode === "sun" ? new THREE.Vector3() : awayFromSun.multiplyScalar(1e4));
+  // Sun view: light from the Sun. Earth view: light from the viewer's side so the globe reads clearly
+  // (the legend says the Earth view isn't to scale; it doesn't model day and night either).
+  sunlight.position.copy(mode === "sun" ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(-4, 3, 8));
   const saved = savedCameras[mode];
   if (saved) {
     camera.position.copy(saved.position);
@@ -298,12 +377,18 @@ function setMode(next) {
     fitCamera(view);
   }
   legend.innerHTML = view.legendHtml;
-  for (const button of document.querySelectorAll("#toolbar button")) {
+  for (const button of document.querySelectorAll("[data-mode]")) {
     button.setAttribute("aria-pressed", String(button.dataset.mode === mode));
   }
 }
 
-for (const button of document.querySelectorAll("#toolbar button")) {
+function zoom(factor) {
+  const offset = camera.position.clone().sub(controls.target).multiplyScalar(factor);
+  camera.position.copy(controls.target.clone().add(offset));
+  controls.update();
+}
+
+for (const button of document.querySelectorAll("[data-mode]")) {
   button.disabled = !views[button.dataset.mode];
   if (button.disabled) {
     button.title = button.dataset.mode === "earth" ? "No recorded close approach for this asteroid"
@@ -311,6 +396,9 @@ for (const button of document.querySelectorAll("#toolbar button")) {
   }
   button.addEventListener("click", () => setMode(button.dataset.mode));
 }
+document.querySelector("[data-zoom='in']").addEventListener("click", () => zoom(0.8));
+document.querySelector("[data-zoom='out']").addEventListener("click", () => zoom(1.25));
+document.querySelector("[data-zoom='reset']").addEventListener("click", () => fitCamera(views[mode]));
 setMode(payload.default_mode);
 
 renderer.setAnimationLoop((time) => {

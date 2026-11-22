@@ -5,30 +5,28 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Orbital viewport</title>
 <style>
-  :root { --bg: #05070d; --panel: rgba(12, 17, 28, 0.82); --text: #d7dde8; --muted: #8b95a7; --accent: #6fb3ff; }
+  :root { --bg: #040a10; --panel: rgba(10, 22, 32, 0.86); --text: #dbe7ee; --muted: #8ea3b0; --accent: #3fd0c9; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
                font: 12px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
   /* The legend is a strip under the canvas, never on top of the drawing. */
   #stage { display: flex; flex-direction: column; width: 100%; height: 100vh; overflow: hidden; }
   #viewport { position: relative; flex: 1; min-height: 0; }
   #viewport canvas { display: block; }
-  .panel { position: absolute; background: var(--panel); border: 1px solid rgba(255,255,255,0.08);
-           border-radius: 8px; padding: 8px 10px; backdrop-filter: blur(4px); }
-  #toolbar { top: 10px; left: 10px; display: flex; gap: 6px; padding: 4px; }
-  #toolbar button { background: transparent; color: var(--text); border: 1px solid rgba(255,255,255,0.15);
-                    border-radius: 6px; padding: 4px 10px; font: inherit; cursor: pointer; }
-  #toolbar button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #04101f; }
-  #toolbar button:disabled { opacity: 0.4; cursor: not-allowed; }
-  #legend { position: static; flex: none; margin: 0 8px 8px; font-size: 11px; max-height: 34vh; overflow: auto; }
-  @media (max-width: 620px) { #hint { display: none; } }
-  #legend h3 { margin: 0 0 4px; font-size: 13px; }
-  #legend p { margin: 2px 0; }
+  .panel { position: absolute; background: var(--panel); border: 1px solid rgba(111, 227, 255, 0.18);
+           border-radius: 6px; padding: 4px; }
+  .tools { top: 10px; display: flex; gap: 4px; }
+  #modes { left: 10px; } #zoom { right: 10px; }
+  .tools button { background: transparent; color: var(--text); border: 1px solid rgba(255,255,255,0.12);
+                  border-radius: 5px; padding: 3px 9px; font: inherit; cursor: pointer; min-width: 28px; }
+  .tools button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #032024; }
+  .tools button:hover { border-color: var(--accent); }
+  .tools button:disabled { opacity: 0.35; cursor: not-allowed; }
+  #legend { flex: none; padding: 6px 10px; font-size: 11px; color: var(--text);
+            border-top: 1px solid rgba(111, 227, 255, 0.15); background: #071119; max-height: 30vh; overflow: auto; }
   #legend .muted { color: var(--muted); }
-  #legend .swatch { display: inline-block; width: 10px; height: 3px; margin-right: 6px; vertical-align: middle; }
   #notice { inset: 0; display: grid; place-items: center; text-align: center; padding: 24px;
             background: var(--bg); color: var(--muted); }
   #notice[hidden] { display: none; }
-  #hint { right: 10px; top: 10px; color: var(--muted); }
 </style>
 <script type="importmap">
 {"imports": {
@@ -40,14 +38,18 @@
 <body>
 <div id="stage">
   <div id="viewport">
-    <div id="toolbar" class="panel" role="group" aria-label="View">
+    <div id="modes" class="panel tools" role="group" aria-label="View">
       <button type="button" data-mode="earth">Earth-centred</button>
       <button type="button" data-mode="sun">Sun-centred</button>
     </div>
-    <div id="hint" class="panel">Drag to rotate, scroll to zoom</div>
+    <div id="zoom" class="panel tools" role="group" aria-label="Camera">
+      <button type="button" data-zoom="in" title="Zoom in">＋</button>
+      <button type="button" data-zoom="out" title="Zoom out">－</button>
+      <button type="button" data-zoom="reset" title="Reset view">⟲</button>
+    </div>
     <div id="notice" class="panel" hidden></div>
   </div>
-  <div id="legend" class="panel"></div>
+  <div id="legend"></div>
 </div>
 <script type="application/json" id="payload">__PAYLOAD__</script>
 <script type="module">
