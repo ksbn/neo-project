@@ -21,13 +21,13 @@ flowchart LR
         You(["You"]) --> R
         D --> R["run_pipeline.sh<br/>combines the 2 steps"]
         R -->|"step 1: schema"| M["migrate.sh<br/>dbmate"]
-        R -->|"step 2: data"| P["pipeline.py"]
+        R -->|"step 2: data"| P["planetary_defense.cli"]
         subgraph Docker
             DB[("PostgreSQL<br/>asteroids table")]
         end
         M --> DB
         P -->|"save (upsert)"| DB
-        A["app.py<br/>Streamlit dashboard"] -->|"read"| DB
+        A["ui/app.py<br/>Streamlit dashboard"] -->|"read"| DB
     end
     NASA[("NASA NeoWs API")]
     P -->|"fetch, 7 days at a time"| NASA
@@ -40,8 +40,8 @@ flowchart LR
 | `scripts/daily_pipeline.sh` | Started by launchd. Waits for the network and Docker, then calls `run_pipeline.sh` |
 | `scripts/run_pipeline.sh` | The only place that combines the schema step and the data step |
 | `scripts/migrate.sh` | Schema step: applies or checks migrations with dbmate |
-| `pipeline.py` | Data step: fetch from NASA, check, save to Postgres |
-| `app.py` | Dashboard that reads the saved data |
+| `planetary_defense.cli` | Data step: fetch from NASA, check, save to Postgres |
+| `planetary_defense.ui.app` | Dashboard that reads the saved data (`streamlit run app.py`) |
 
 ---
 
@@ -52,9 +52,9 @@ flowchart TD
     A["Read arguments<br/>--start / --end / --dry-run"] --> B["Split dates into 7-day windows"]
     B --> C["Connect to the database first<br/>(so NASA calls aren't wasted)"]
     C --> D{"Another window?"}
-    D -->|yes| E["client.py<br/>GET /feed, with retries"]
-    E --> F["models.py<br/>check each asteroid,<br/>skip bad ones"]
-    F --> G["database.py<br/>keep the newest approach per asteroid,<br/>save in 1 transaction<br/>(only new or changed rows)"]
+    D -->|yes| E["nasa_client.py<br/>GET /feed, with retries"]
+    E --> F["nasa_dto.py<br/>check each asteroid,<br/>skip bad ones"]
+    F --> G["repository.py<br/>keep the newest approach per asteroid,<br/>save in 1 transaction<br/>(only new or changed rows)"]
     G --> D
     D -->|no| H["Print summary, exit 0"]
     E -.->|"NASA failed"| X["Stop: exit 3, or 1 if the key was rejected,<br/>or 7 if the request or format was rejected<br/>(5 if earlier windows were saved)"]
@@ -82,24 +82,24 @@ Each window is saved in its own transaction, so a run that stops halfway keeps t
 ```mermaid
 flowchart TD
     subgraph Entry["Entry points"]
-        pipeline["pipeline.py<br/>CLI, wiring, CLI_OUTCOMES"]
-        app["app.py<br/>wiring, breakers, rendering"]
-        ui["ui_messages.py<br/>UI_MESSAGES"]
+        pipeline["cli.py<br/>CLI, wiring, CLI_OUTCOMES"]
+        app["ui/app.py<br/>wiring, breakers, rendering"]
+        ui["ui/messages.py<br/>UI_MESSAGES"]
     end
     subgraph Services["Application services"]
-        ingest["ingest.py<br/>IngestService, LogObserver"]
-        dash["dashboard_data.py<br/>views, FallbackReader"]
-        res["resilience.py<br/>CircuitBreaker"]
+        ingest["application/ingest_feed.py<br/>IngestService, observers"]
+        dash["application/dashboard_service.py<br/>views, FallbackReader"]
+        res["infrastructure/error_boundary.py<br/>CircuitBreaker"]
     end
     subgraph Core["Domain"]
-        ports["ports.py<br/>FeedSource, AsteroidStore, AsteroidReader"]
-        domain["domain.py<br/>Asteroid, CloseApproach, Observation, latest"]
-        errors["errors.py<br/>NeoError tree"]
+        ports["application/ports.py<br/>FeedSource, AsteroidStore, AsteroidReader, RunLog"]
+        domain["domain/models.py<br/>Asteroid, CloseApproach, Observation, latest"]
+        errors["domain/errors.py<br/>NeoError tree"]
     end
     subgraph Adapters["Adapters"]
-        client["client.py<br/>talks to NASA"]
-        models["models.py<br/>NASA JSON shapes"]
-        database["database.py<br/>talks to Postgres"]
+        client["infrastructure/nasa_client.py<br/>talks to NASA"]
+        models["infrastructure/nasa_dto.py<br/>NASA JSON shapes"]
+        database["infrastructure/repository.py + db.py<br/>talks to Postgres"]
         config["config.py<br/>reads .env"]
     end
     pipeline --> ingest
@@ -129,9 +129,9 @@ flowchart TD
     database -.->|"expects the table defined in"| mig
 ```
 
-Solid arrows are Python imports. Services and ports import only the domain; the entry points are the only modules that pick concrete adapters. Dotted arrows to `ports.py` mean "has the methods the protocol asks for"; nothing inherits, and pyright checks it in CI. Dotted arrows to migrations are assumptions kept in sync by hand. Tests fail if the column size limits in `models.py` or the column list in `database.py` drift from the migrations.
+Solid arrows are Python imports. Services and ports import only the domain; the entry points are the only modules that pick concrete adapters. Dotted arrows to `application/ports.py` mean "has the methods the protocol asks for"; nothing inherits, and pyright checks it in CI. Dotted arrows to migrations are assumptions kept in sync by hand. Tests fail if the column size limits in `nasa_dto.py` or the column list in `repository.py` drift from the migrations.
 
-Errors: each adapter turns its library's exceptions into one `NeoError` subclass (`UpstreamUnavailable`, `UpstreamRateLimited`, `UpstreamAuthError`, `UpstreamRequestError`, `FeedContractError`, `StorageError`, `ConfigError`). The classes only classify. `pipeline.CLI_OUTCOMES` maps them to exit codes and `ui_messages.UI_MESSAGES` to dashboard text, both by the most specific class, so a new subclass can never crash a handler.
+Errors: each adapter turns its library's exceptions into one `NeoError` subclass (`UpstreamUnavailable`, `UpstreamRateLimited`, `UpstreamAuthError`, `UpstreamRequestError`, `FeedContractError`, `StorageError`, `ConfigError`). The classes only classify. `cli.CLI_OUTCOMES` maps them to exit codes and `ui.messages.UI_MESSAGES` to dashboard text, both by the most specific class, so a new subclass can never crash a handler.
 
 ---
 
@@ -203,9 +203,9 @@ erDiagram
 
 How one window is written (all in one transaction, `AsteroidRepository.save`):
 
-1. `domain.latest()` picks the newest observation per asteroid, which is upserted into `asteroids`. The SQL `WHERE` guard also refuses to replace a newer approach, so an old backfill or an overlapping run can't move it backwards.
+1. `domain.models.latest()` picks the newest observation per asteroid, which is upserted into `asteroids`. The SQL `WHERE` guard also refuses to replace a newer approach, so an old backfill or an overlapping run can't move it backwards.
 2. Every observation's approach is upserted into `close_approaches`, keyed by `(neo_reference_id, close_approach_date, orbiting_body)`. A new pass adds a row; a pass NASA revised updates its numbers; a re-run changes nothing.
 
 The `close_approaches` migration seeded the table from the approaches already in `asteroids`, so history starts with what was stored before it existed.
 
-`ingestion_runs` gets one row per run that started fetching, written by `ingest.IngestionRunRecorder` over its own autocommit connection, so a failed or partial run is recorded even after its data transaction rolled back. Runs that stop earlier (missing settings, database down) can't be recorded; the dashboard flags data older than 36 hours instead. Dry runs record nothing.
+`ingestion_runs` gets one row per run that started fetching, written by `application.ingest_feed.IngestionRunRecorder` over its own autocommit connection, so a failed or partial run is recorded even after its data transaction rolled back. Runs that stop earlier (missing settings, database down) can't be recorded; the dashboard flags data older than 36 hours instead. Dry runs record nothing.

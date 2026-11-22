@@ -1,4 +1,0 @@
--r requirements.txt
-pytest>=8.0,<10
-responses>=0.25,<1
-pyright>=1.1.414,<2
