@@ -290,6 +290,20 @@ class AsteroidRepository:
             raise _storage_error("Listing asteroids", exc) from exc
         return [_summary(r) for r in rows]
 
+    def daily_approaches(self, since: date) -> list[tuple[date, int]]:
+        """Recorded close approaches per day from ``since`` on (days without any are omitted)."""
+        query = """
+            SELECT close_approach_date, COUNT(*) FROM close_approaches
+            WHERE close_approach_date >= %s GROUP BY 1 ORDER BY 1
+        """
+        try:
+            with self._conn.transaction(), self._conn.cursor() as cur:
+                cur.execute(query, (since,))
+                rows = cur.fetchall()
+        except psycopg.Error as exc:
+            raise _storage_error("Daily approaches", exc) from exc
+        return [(day, int(n)) for day, n in rows]
+
     def approach_history(self, neo_reference_id: str, limit: int = 100) -> list[ApproachSummary]:
         """Recorded approaches of one asteroid, newest first."""
         if limit < 1:

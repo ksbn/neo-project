@@ -23,18 +23,22 @@ def metrics(at: AppTest) -> dict[str, str]:
     return {m.label: m.value for m in at.metric}
 
 
-def test_kpi_bar_shows_whole_dataset_figures():
-    shown = metrics(run())
-    assert shown["Tracked NEOs"] == "3"
-    assert shown["Potentially Hazardous"] == "2"
-    assert shown["Closest Pass"] == "15.65 LD"
-    assert shown["Fastest Pass"] == "36.9 km/s"
-    assert shown["Warnings & Critical"] == "1"
+def page_html(at: AppTest) -> str:
+    return "\n".join(h.proto.body for h in at.get("html"))
 
 
-def test_status_banner_and_alerts_panel():
+def test_kpi_strip_has_the_four_cards_from_stored_data():
+    text = page_html(run())
+    for title in ("Threat Level", "Near-Earth Objects", "Close Approaches (±3 days)", "Global Defense Readiness"):
+        assert title in text
+    assert ">3<" in text  # tracked NEOs
+    assert text.count('<i title="') == 5  # the approaches-per-day sparkline, one bar per day
+    assert "NOMINAL" in text and "Last sync 2026-11-22 08:00 UTC" in text
+
+
+def test_healthy_runs_need_no_banner_and_alerts_panel_filters():
     at = run()
-    assert any("Last pipeline run" in s.value for s in [*at.success, *at.warning])
+    assert not at.main.success  # the readiness card shows the healthy state instead
     alerts = at.dataframe[0].value  # watch-or-worse by default: the info alert is hidden
     assert list(alerts["severity"]) == ["Warning", "Watch"]
 
@@ -111,4 +115,4 @@ def test_command_header_and_non_blocking_sync_failure():
     at.button(key="sync_feed").click().run()
     assert not at.exception
     assert any("did not complete" in w.value for w in at.warning)
-    assert metrics(at)  # the stored data is still on the page
+    assert "Threat Level" in page_html(at)  # the stored data is still on the page

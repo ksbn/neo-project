@@ -252,6 +252,7 @@ class AsteroidView:
     status: PipelineStatus | None = None
     history_available: bool = False
     alerts: list[AnomalyAlert] = field(default_factory=list)  # most urgent first
+    trend: list[tuple[date, int]] = field(default_factory=list)  # close approaches per day, oldest first
 
     @property
     def is_empty(self) -> bool:

@@ -100,6 +100,9 @@ class StubReader:
     def approach_history(self, neo_reference_id: str, limit: int) -> list[ApproachSummary]:
         return []
 
+    def daily_approaches(self, since: date) -> list[tuple[date, int]]:
+        return [(since, 2)]
+
 
 LAST_RUN = IngestionRun(
     started_at=datetime(2026, 11, 22, 7, 59, tzinfo=UTC), finished_at=datetime(2026, 11, 22, 8, 0, tzinfo=UTC),
@@ -233,10 +236,12 @@ def control_room_view(*, live: bool = False) -> AsteroidView:
     ]
     overview = Overview(total=3, hazardous=2, latest_approach=date(2026, 11, 20), approaches=4,
                         closest_miss_ld=15.65, fastest_km_s=36.9)
+    trend = [(date(2026, 11, d), n) for d, n in ((16, 3), (17, 5), (18, 4), (19, 7), (20, 6))]
     if live:
-        return AsteroidView(overview=overview, rows=rows, alerts=alerts)
+        return AsteroidView(overview=overview, rows=rows, alerts=alerts, trend=trend)
     status = PipelineStatus(last_run=LAST_RUN, last_success_at=LAST_RUN.finished_at)
-    return AsteroidView(overview=overview, rows=rows, status=status, history_available=True, alerts=alerts)
+    return AsteroidView(overview=overview, rows=rows, status=status, history_available=True, alerts=alerts,
+                        trend=trend)
 
 
 class FakeDashboard:

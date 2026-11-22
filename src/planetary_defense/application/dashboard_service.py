@@ -20,6 +20,7 @@ from planetary_defense.application.ports import AlertReader, AsteroidReader, Fee
 from planetary_defense.domain.anomaly_rules import Rule, default_rules, evaluate
 from planetary_defense.domain.errors import NeoError
 from planetary_defense.domain.models import (
+    AnomalyAlert,
     ApproachSummary,
     AsteroidSummary,
     AsteroidView,
@@ -34,12 +35,18 @@ logger = logging.getLogger(__name__)
 
 MAX_ROWS: Final = 5_000
 MAX_ALERTS: Final = 200
+TREND_DAYS: Final = 14
 # Live fallback covers today and the 2 days before it, matching scripts/daily_pipeline.sh.
 API_FALLBACK_DAYS: Final = 2
 
 
 def view_from_store(
-    reader: AsteroidReader, runs: RunReader, alerts: AlertReader, limit: int = MAX_ROWS, alert_limit: int = MAX_ALERTS
+    reader: AsteroidReader,
+    runs: RunReader,
+    alerts: AlertReader,
+    limit: int = MAX_ROWS,
+    alert_limit: int = MAX_ALERTS,
+    today: date | None = None,
 ) -> AsteroidView:
     """Totals over the whole table, the newest ``limit`` rows, the pipeline's status and the stored alerts.
 
@@ -48,6 +55,8 @@ def view_from_store(
     to the live API.
     """
     overview, rows = reader.overview(), reader.list_recent(limit)
+    since = (today or date.today()) - timedelta(days=TREND_DAYS - 1)
+    trend = reader.daily_approaches(since)
     try:
         status = runs.pipeline_status()
     except NeoError as exc:
@@ -58,7 +67,9 @@ def view_from_store(
     except NeoError as exc:
         logger.warning("Alerts unavailable: %s", exc)
         stored_alerts = []
-    return AsteroidView(overview=overview, rows=rows, status=status, history_available=True, alerts=stored_alerts)
+    return AsteroidView(
+        overview=overview, rows=rows, status=status, history_available=True, alerts=stored_alerts, trend=trend
+    )
 
 
 def view_from_feed(
@@ -94,7 +105,11 @@ def view_from_feed(
         fastest_km_s=max(speeds, default=None),
     )
     alerts = evaluate(newest, rules if rules is not None else default_rules())
-    return AsteroidView(overview=overview, rows=rows, alerts=alerts)
+    per_day: dict[date, int] = {}
+    for o in batch.observations:
+        if o.approach_date is not None:
+            per_day[o.approach_date] = per_day.get(o.approach_date, 0) + 1
+    return AsteroidView(overview=overview, rows=rows, alerts=alerts, trend=sorted(per_day.items()))
 
 
 def _float(value: Decimal | None) -> float | None:
@@ -168,3 +183,37 @@ class DashboardData(Protocol):
 class SyncReport:
     ok: bool
     message: str
+
+
+# --------------------------------------------------------------------------- #
+# KPI strip figures (pure, so every card renders from stored data alone)
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class WindowSummary:
+    """Close approaches within ``days`` of ``today`` (latest pass per asteroid)."""
+
+    start: date
+    end: date
+    count: int
+    closest: AsteroidSummary | None
+    closest_ld: float | None
+
+
+def window_summary(rows: Iterable[AsteroidSummary], today: date, days: int = 3) -> WindowSummary:
+    start, end = today - timedelta(days=days), today + timedelta(days=days)
+    inside = [r for r in rows if r.close_approach_date is not None and start <= r.close_approach_date <= end]
+    with_miss = [r for r in inside if r.miss_distance_km is not None]
+    closest = min(with_miss, key=lambda r: r.miss_distance_km or 0.0, default=None)
+    closest_ld = km_to_ld(closest.miss_distance_km) if closest and closest.miss_distance_km is not None else None
+    return WindowSummary(start=start, end=end, count=len(inside), closest=closest, closest_ld=closest_ld)
+
+
+def threat_level(alerts: Iterable[AnomalyAlert], today: date, days: int = 7) -> Severity | None:
+    """The most severe alert on a pass within ``days`` of ``today``; None when there is none."""
+    near = [
+        a.severity for a in alerts
+        if a.close_approach_date is not None and abs((a.close_approach_date - today).days) <= days
+    ]
+    return max(near, default=None)

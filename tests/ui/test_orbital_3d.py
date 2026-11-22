@@ -123,3 +123,15 @@ def test_inspector_payload_uses_the_latest_pass_or_today():
     only_alerted = viewport_payload(LOOKUP, "Zoozve", None, "cached", today=date(2026, 11, 22))
     assert only_alerted["earth"] is None and only_alerted["sun"]["date"] == "2026-11-22"
     assert only_alerted["hazardous"] is False
+
+
+
+def test_sparkline_bars_scale_to_the_largest_value():
+    import re
+
+    from planetary_defense.ui.components.kpi_strip import sparkline_bars
+
+    heights = [int(h) for h in re.findall(r"height:(\d+)%", sparkline_bars([1, 5, 10]))]
+    assert heights == [10, 50, 100]
+    assert re.findall(r"height:(\d+)%", sparkline_bars([0, 4])) == ["8", "100"]  # a zero day still shows a stub
+    assert "<i" not in sparkline_bars([])

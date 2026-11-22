@@ -369,3 +369,12 @@ def test_a_pass_with_no_alerts_left_is_cleared(two_asteroids):
 def test_alerts_must_belong_to_a_stored_asteroid(two_asteroids):
     with pytest.raises(StorageError):
         two_asteroids.replace_alerts([("404", D10)], [alert("404", D10, "high_velocity", Severity.WATCH)])
+
+
+
+def test_daily_approaches_counts_passes_per_day_from_a_date(conn):
+    repo = AsteroidRepository(conn)
+    repo.save(records(make_neo("1", "2026-11-10"), make_neo("2", "2026-11-10")))
+    repo.save(records(make_neo("3", "2026-11-12"), day="2026-11-12"))
+    assert repo.daily_approaches(since=date(2026, 11, 10)) == [(date(2026, 11, 10), 2), (date(2026, 11, 12), 1)]
+    assert repo.daily_approaches(since=date(2026, 11, 11)) == [(date(2026, 11, 12), 1)]

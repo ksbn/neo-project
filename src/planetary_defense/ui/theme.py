@@ -54,7 +54,7 @@ h3 {{ font-size: 0.95rem !important; text-transform: uppercase; color: {PALETTE[
 .astraea-dot {{ display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px;
                 vertical-align: middle; box-shadow: 0 0 6px currentColor; }}
 .astraea-card {{ border: 1px solid {PALETTE["border"]}; border-radius: 8px; background: {PALETTE["panel"]};
-                 padding: 12px 14px; height: 100%; }}
+                 padding: 12px 14px; height: 100%; min-height: 138px; box-sizing: border-box; }}
 .astraea-card .label {{ font-family: {MONO}; font-size: 0.7rem; text-transform: uppercase;
                         letter-spacing: 0.08em; color: {PALETTE["muted"]}; }}
 .astraea-card .value {{ font-family: {MONO}; font-size: 1.6rem; font-weight: 700; margin: 4px 0 2px; }}
@@ -65,6 +65,8 @@ h3 {{ font-size: 0.95rem !important; text-transform: uppercase; color: {PALETTE[
                   padding: 8px 10px; margin-bottom: 2px; }}
 .astraea-alert .name {{ font-weight: 600; }}
 .astraea-alert .meta {{ font-family: {MONO}; font-size: 0.72rem; color: {PALETTE["muted"]}; }}
+.astraea-spark {{ display: flex; align-items: flex-end; gap: 2px; height: 26px; margin: 2px 0 4px; }}
+.astraea-spark i {{ flex: 1; max-width: 8px; border-radius: 1px; opacity: 0.85; }}
 .astraea-readouts {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }}
 .astraea-readout {{ border: 1px solid {PALETTE["border"]}; border-radius: 6px; padding: 8px 10px;
                     background: {PALETTE["panel"]}; }}

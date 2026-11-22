@@ -36,7 +36,7 @@ from planetary_defense.infrastructure.repository import (
     OrbitRepository,
 )
 from planetary_defense.ui import theme
-from planetary_defense.ui.components import alerts_panel, approach_table, command_header, inspector_drawer, kpi_bar
+from planetary_defense.ui.components import alerts_panel, approach_table, command_header, inspector_drawer, kpi_strip
 from planetary_defense.ui.messages import describe, run_health, sync_message
 
 DB_COOLDOWN_S = 30
@@ -188,12 +188,13 @@ def render_sidebar(result: LoadResult, data: DashboardData) -> None:
 
 
 def render_status(view: AsteroidView) -> None:
-    """The pipeline's last run; only the stored view has one."""
+    """A banner only when something needs attention; the readiness card shows the healthy state."""
     if not view.history_available:
         st.info("Showing live NASA data: the database is unavailable, so alerts are scored on the fly.")
         return
     health = run_health(view.status, datetime.now(UTC))
-    getattr(st, health.level)(health.text)
+    if health.level != "success":
+        getattr(st, health.level)(health.text)
 
 
 def render(data: DashboardData) -> None:
@@ -211,8 +212,8 @@ def render(data: DashboardData) -> None:
         return
 
     view = result.view
+    kpi_strip.render(view)
     render_status(view)
-    kpi_bar.render(view)
     left, right = st.columns([3, 2], gap="large")
     with left:
         alerts_panel.render(view)
