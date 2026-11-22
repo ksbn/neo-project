@@ -12,6 +12,15 @@ from collections.abc import Sequence
 from datetime import date
 from typing import Protocol
 
+from planetary_defense.domain.catalog import (
+    IdempotencyClaim,
+    ObjectPage,
+    ObjectQuery,
+    ObjectRow,
+    WatchlistEntry,
+    WatchRequest,
+    WatchResult,
+)
 from planetary_defense.domain.models import (
     AnomalyAlert,
     ApproachSummary,
@@ -106,3 +115,24 @@ class UpcomingReader(Protocol):
     """Predicted Earth passes of the asteroids whose orbits are cached (read side)."""
 
     def upcoming_approaches(self, since: date, until: date, limit: int) -> list[UpcomingApproach]: ...
+
+
+class ObjectReader(Protocol):
+    """The REST API's catalog queries (read side)."""
+
+    def search(self, query: ObjectQuery) -> ObjectPage: ...
+
+    def find(self, neo_reference_id: str) -> tuple[ObjectRow, str | None] | None:
+        """The object and its NASA JPL URL; None when it is not stored."""
+        ...
+
+    def alerts_for(self, neo_reference_id: str) -> list[AnomalyAlert]: ...
+
+
+class WatchlistStore(Protocol):
+    """The operator watchlist. ``add`` is idempotent per claim; raises AlreadyWatched, UnknownObject or
+    IdempotencyKeyReused."""
+
+    def add(self, request: WatchRequest, claim: IdempotencyClaim | None = None) -> WatchResult: ...
+
+    def watch_of(self, neo_reference_id: str) -> WatchlistEntry | None: ...
