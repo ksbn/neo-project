@@ -42,6 +42,8 @@ tags:
     description: Near-earth objects with their latest close approach, orbit and alerts.
   - name: Watchlist
     description: Objects an operator has chosen to follow.
+  - name: Summary
+    description: Aggregates for dashboard KPIs.
 paths:
   /objects:
     get:
@@ -58,6 +60,7 @@ paths:
         - $ref: '#/components/parameters/MaxDistanceLd'
         - $ref: '#/components/parameters/MinVelocityKmS'
         - $ref: '#/components/parameters/MinSeverity'
+        - $ref: '#/components/parameters/Watched'
         - $ref: '#/components/parameters/ApproachFrom'
         - $ref: '#/components/parameters/ApproachTo'
         - $ref: '#/components/parameters/Sort'
@@ -114,6 +117,32 @@ paths:
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
   /watchlist:
+    get:
+      tags: [Watchlist]
+      operationId: listWatchlistEntries
+      summary: List the watchlist
+      description: Watched objects, most recently added first. Added by ADR 0002.
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: A page of watchlist entries.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WatchlistPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
     post:
       tags: [Watchlist]
       operationId: createWatchlistEntry
@@ -172,6 +201,30 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
+  /summary:
+    get:
+      tags: [Summary]
+      operationId: getSummary
+      summary: Dashboard KPIs
+      description: |
+        Aggregates over every stored object, so KPI cards never have to page through
+        `/objects`. Added by ADR 0001.
+      responses:
+        '200':
+          description: The current figures.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Summary'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 components:
   parameters:
     NeoReferenceId:
@@ -222,6 +275,13 @@ components:
       description: Only objects whose latest pass raised an alert at least this severe.
       schema:
         $ref: '#/components/schemas/Severity'
+    Watched:
+      name: watched
+      in: query
+      required: false
+      description: Only objects that are (`true`) or are not (`false`) on the watchlist. Added by ADR 0002.
+      schema:
+        type: boolean
     ApproachFrom:
       name: approach_from
       in: query
@@ -459,12 +519,16 @@ components:
         - estimated_diameter_max_m
         - latest_approach
         - alert_level
+        - watched
       properties:
         neo_reference_id:
           $ref: '#/components/schemas/NeoReferenceId'
         name:
           type: string
           examples: [524522 Zoozve (2002 VE68)]
+        watched:
+          type: boolean
+          description: Whether the object is on the watchlist. Added by ADR 0002.
         is_potentially_hazardous:
           type: boolean
         is_sentry_object:
@@ -691,6 +755,95 @@ components:
         created_at:
           type: string
           format: date-time
+    WatchlistPage:
+      type: object
+      required: [items, pagination]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/WatchlistEntry'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+    AlertCounts:
+      type: object
+      description: Objects whose latest pass raised an alert, by the most severe level.
+      required: [info, watch, warning, critical]
+      properties:
+        info:
+          type: integer
+          minimum: 0
+        watch:
+          type: integer
+          minimum: 0
+        warning:
+          type: integer
+          minimum: 0
+        critical:
+          type: integer
+          minimum: 0
+    DailyCount:
+      type: object
+      required: [date, count]
+      properties:
+        date:
+          type: string
+          format: date
+        count:
+          type: integer
+          minimum: 0
+    ClosestApproach:
+      type: object
+      required: [neo_reference_id, name, approach]
+      properties:
+        neo_reference_id:
+          $ref: '#/components/schemas/NeoReferenceId'
+        name:
+          type: string
+        approach:
+          $ref: '#/components/schemas/Approach'
+    Summary:
+      type: object
+      required:
+        - total_objects
+        - hazardous_objects
+        - watched_objects
+        - alert_counts
+        - closest_approach
+        - latest_approach_date
+        - last_sync_at
+        - approaches_per_day
+      properties:
+        total_objects:
+          type: integer
+          minimum: 0
+        hazardous_objects:
+          type: integer
+          minimum: 0
+        watched_objects:
+          type: integer
+          minimum: 0
+        alert_counts:
+          $ref: '#/components/schemas/AlertCounts'
+        closest_approach:
+          description: The closest latest pass of any object; `null` when nothing is stored.
+          oneOf:
+            - $ref: '#/components/schemas/ClosestApproach'
+            - type: 'null'
+        latest_approach_date:
+          type: [string, 'null']
+          format: date
+          description: The newest recorded pass; `null` when nothing is stored.
+        last_sync_at:
+          type: [string, 'null']
+          format: date-time
+          description: When the ingestion pipeline last finished successfully; `null` if it never has.
+        approaches_per_day:
+          type: array
+          description: Recorded close approaches per day over the last 14 days (days without any included as 0), oldest first.
+          maxItems: 14
+          items:
+            $ref: '#/components/schemas/DailyCount'
     ErrorDetail:
       type: object
       required: [field, reason]
