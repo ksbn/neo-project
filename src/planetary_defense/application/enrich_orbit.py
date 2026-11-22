@@ -105,7 +105,8 @@ class OrbitEnricher:
         """
         now = self._clock()
         cached = self._read_cache(neo_reference_id)
-        if cached is not None and now - cached.fetched_at <= self._max_age:
+        # A copy cached before approaches were stored is refreshed once, so it gains its pass list.
+        if cached is not None and now - cached.fetched_at <= self._max_age and cached.orbit.approaches is not None:
             return OrbitLookup(cached.orbit, cached.fetched_at, OrbitOrigin.CACHE)
 
         try:
@@ -157,21 +158,22 @@ class WarmResult:
     failed: int = 0
 
 
-def warm_orbits(
-    enricher: OrbitEnricher,
-    alerts: Iterable[AnomalyAlert],
-    *,
-    min_severity: Severity = Severity.WARNING,
-    limit: int = 10,
-) -> WarmResult:
-    """Make sure the orbits of the most urgent alerts' asteroids are cached.
-
-    So the 3D view of the asteroids people are most likely to open never waits
-    on NASA. Most urgent first, each asteroid once, at most ``limit``. Best
-    effort: operational failures are logged and counted, never raised.
-    """
+def warm_targets(
+    alerts: Iterable[AnomalyAlert], also: Iterable[str] = (), *, min_severity: Severity = Severity.WARNING
+) -> list[str]:
+    """Which orbits to cache, in order: the most urgent alerts' asteroids first, then ``also``; each once."""
     ranked = sorted((a for a in alerts if a.severity >= min_severity), key=lambda a: -a.severity)
-    targets = list(dict.fromkeys(a.neo_reference_id for a in ranked))[:limit]
+    return list(dict.fromkeys([*(a.neo_reference_id for a in ranked), *also]))
+
+
+def warm_orbits(enricher: OrbitEnricher, neo_reference_ids: Iterable[str], *, limit: int = 10) -> WarmResult:
+    """Make sure the orbits (and predicted passes) of the first ``limit`` asteroids are cached.
+
+    So the 3D view of the asteroids people are most likely to open never waits on
+    NASA, and the upcoming-approaches panel knows their next passes. Best effort:
+    operational failures are logged and counted, never raised.
+    """
+    targets = list(dict.fromkeys(neo_reference_ids))[:limit]
     fetched = cached = failed = 0
     for neo_reference_id in targets:
         try:

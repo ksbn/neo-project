@@ -14,7 +14,7 @@ Runs: :class:`IngestionRun` records what one pipeline run did; :class:`PipelineS
 is what the dashboard needs to know about recent runs.
 
 Read side (dashboard): :class:`AsteroidSummary`, :class:`ApproachSummary`,
-:class:`Overview` and :class:`AsteroidView`.
+:class:`UpcomingApproach`, :class:`Overview` and :class:`AsteroidView`.
 
 Control Room: :class:`AnomalyAlert` and :class:`Severity` (rules in
 ``domain/anomaly_rules.py``); :class:`OrbitalElements`, :class:`Vec3` and
@@ -232,6 +232,38 @@ class ApproachSummary:
 
 
 @dataclass(frozen=True)
+class UpcomingApproach:
+    """A future Earth pass that NASA/JPL predicts for an asteroid whose orbit is cached."""
+
+    neo_reference_id: str
+    name: str
+    is_potentially_hazardous: bool
+    estimated_diameter_min_km: float | None
+    estimated_diameter_max_km: float | None
+    approach: ApproachSummary
+
+    def observation(self) -> Observation:
+        """The pass as an :class:`Observation`, so the anomaly rules can score it like a recorded one."""
+        def dec(value: float | None) -> Decimal | None:
+            return Decimal(str(value)) if value is not None else None
+
+        a = self.approach
+        return Observation(
+            asteroid=Asteroid(
+                neo_reference_id=self.neo_reference_id, name=self.name,
+                is_potentially_hazardous=self.is_potentially_hazardous,
+                estimated_diameter_min_km=dec(self.estimated_diameter_min_km),
+                estimated_diameter_max_km=dec(self.estimated_diameter_max_km),
+            ),
+            approach=CloseApproach(
+                close_approach_date=a.close_approach_date, orbiting_body=a.orbiting_body,
+                relative_velocity_km_s=Decimal(str(a.relative_velocity_km_s)),
+                miss_distance_km=Decimal(str(a.miss_distance_km)),
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class Overview:
     """Totals over the whole data set, not just the rows that were loaded."""
 
@@ -254,6 +286,9 @@ class AsteroidView:
     history_available: bool = False
     alerts: list[AnomalyAlert] = field(default_factory=list)  # most urgent first
     trend: list[tuple[date, int]] = field(default_factory=list)  # close approaches per day, oldest first
+    # Predicted future Earth passes (soonest first) and the alerts the rules raise for them.
+    upcoming: list[UpcomingApproach] = field(default_factory=list)
+    upcoming_alerts: list[AnomalyAlert] = field(default_factory=list)
 
     @property
     def is_empty(self) -> bool:
@@ -366,6 +401,13 @@ class OrbitData:
     orbit_id: str | None = None  # JPL solution number; changes when NASA refines the orbit
     orbit_class: str | None = None  # e.g. APO, ATE, AMO
     moid_au: float | None = None  # minimum orbit intersection distance with Earth
+    # Every Earth close approach NASA/JPL lists (1900-2200), oldest first. None: not fetched yet
+    # (an orbit cached before approaches were stored), so the cache refreshes it.
+    approaches: tuple[ApproachSummary, ...] | None = None
+
+    def next_approach(self, today: date) -> ApproachSummary | None:
+        """The first listed approach on or after ``today``."""
+        return next((a for a in self.approaches or () if a.close_approach_date >= today), None)
 
 
 @dataclass(frozen=True)

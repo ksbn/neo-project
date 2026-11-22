@@ -8,11 +8,14 @@ from planetary_defense.domain.units import LUNAR_DISTANCE_KM
 
 
 def page(live: bool = False, empty: bool = False, orbit_fails: bool = False) -> None:
+    from datetime import date
+
     from planetary_defense.ui.app import render
 
     from fakes import FakeDashboard  # imported inside: AppTest runs this function's source as the script
 
-    render(FakeDashboard(live=live, empty=empty, orbit_fails=orbit_fails))
+    # The day of the fake's data, so the date windows (threat level, upcoming horizon) don't drift with the clock.
+    render(FakeDashboard(live=live, empty=empty, orbit_fails=orbit_fails), today=date(2026, 11, 22))
 
 
 def run(**kwargs: bool) -> AppTest:
@@ -127,3 +130,39 @@ def test_command_header_and_non_blocking_sync_failure():
     assert not at.exception
     assert any("did not complete" in w.value for w in at.warning)
     assert "Threat Level" in page_html(at)  # the stored data is still on the page
+
+
+def upcoming_rows(at: AppTest) -> list[str]:
+    return [h.proto.body for h in at.get("html") if "astraea-alert upcoming" in h.proto.body]
+
+
+def test_upcoming_panel_lists_predicted_passes_with_alerts_ahead_of_time():
+    at = run()
+    assert "Upcoming Approaches" in page_html(at)
+    first, second = upcoming_rows(at)  # Zoozve's 2034 pass is beyond the default one-year horizon
+    # 'a' passes within 4 LD on 2027-03-15: flagged months ahead; 'b' at 30 LD is a nominal pass.
+    assert "WARNING: (2001 KF54)" in first and "<b>2027-03-15</b>" in first and "in 4 mo" in first
+    assert "(2019 BG3)" in second and "Nominal pass" in second
+
+    at.selectbox(key="upcoming_horizon").set_value("Next 10 years").run()
+    assert "<b>2034-10-31</b>" in upcoming_rows(at)[-1]  # Zoozve's next pass
+
+    at.checkbox(key="upcoming_alerted_only").check().run()
+    assert len(upcoming_rows(at)) == 2 and not any("Nominal pass" in r for r in upcoming_rows(at))
+
+
+def test_upcoming_track_button_tracks_the_asteroid():
+    at = run()
+    next(b for b in at.button if b.key and b.key.startswith("upcoming_") and b.key.endswith("_a")).click().run()
+    assert at.selectbox(key="selected_neo_id").value == "a"
+
+
+def test_telemetry_shows_the_next_predicted_pass():
+    text = page_html(run())
+    assert "Next Earth Pass (predicted)" in text and "2034-10-31 · 16.80 LD" in text  # Zoozve, from its orbit
+    assert "<span>Orbit Class</span><span>ATE</span>" in text
+
+
+def test_live_fallback_has_no_predictions():
+    at = run(live=True)
+    assert any("orbit cache, which is unavailable" in c.value for c in at.caption)

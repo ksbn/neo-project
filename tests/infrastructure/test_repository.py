@@ -305,6 +305,50 @@ def test_orbits_need_no_stored_asteroid(conn):
     assert OrbitRepository(conn).get_orbit("99") is not None
 
 
+def test_cached_approaches_round_trip_and_are_replaced_with_the_orbit(conn):
+    cache = OrbitRepository(conn)
+    cache.put_orbit(CachedOrbit(orbit=zoozve_orbit(), fetched_at=T0))
+    stored = cache.get_orbit("2524522")
+    assert stored is not None and stored.orbit.approaches == zoozve_orbit().approaches
+
+    revised = (ApproachSummary(date(2034, 10, 31), "Earth", 8.8, 6_500_000.0),)
+    cache.put_orbit(CachedOrbit(orbit=replace(zoozve_orbit(), approaches=revised), fetched_at=T0))
+    refreshed = cache.get_orbit("2524522")
+    assert refreshed is not None and refreshed.orbit.approaches == revised
+
+
+def test_an_orbit_without_approach_data_reads_back_as_not_fetched(conn):
+    """Orbits cached before approaches were stored (approaches_known false) must read as None, not ()."""
+    cache = OrbitRepository(conn)
+    cache.put_orbit(CachedOrbit(orbit=replace(zoozve_orbit(), approaches=None), fetched_at=T0))
+    stored = cache.get_orbit("2524522")
+    assert stored is not None and stored.orbit.approaches is None
+
+    cache.put_orbit(CachedOrbit(orbit=replace(zoozve_orbit(), approaches=()), fetched_at=T0))
+    stored = cache.get_orbit("2524522")
+    assert stored is not None and stored.orbit.approaches == ()
+
+
+def test_upcoming_approaches_across_asteroids_soonest_first_with_stored_names(conn):
+    AsteroidRepository(conn).save(records(make_neo("2524522", name="524522 Zoozve (2002 VE68)",
+                                                   is_potentially_hazardous_asteroid=True)))
+    cache = OrbitRepository(conn)
+    cache.put_orbit(CachedOrbit(orbit=zoozve_orbit(), fetched_at=T0))
+    soon = (ApproachSummary(date(2027, 1, 5), "Earth", 20.0, 3_000_000.0),)
+    cache.put_orbit(CachedOrbit(orbit=replace(zoozve_orbit(), neo_reference_id="77", approaches=soon), fetched_at=T0))
+
+    upcoming = cache.upcoming_approaches(date(2026, 11, 22), date(2040, 1, 1))
+
+    assert [(u.neo_reference_id, u.approach.close_approach_date) for u in upcoming] == [
+        ("77", date(2027, 1, 5)), ("2524522", date(2034, 10, 31))]  # past and post-2040 passes excluded
+    assert upcoming[0].name == "77" and not upcoming[0].is_potentially_hazardous  # not in asteroids: listed by id
+    zoozve = upcoming[1]
+    assert zoozve.name == "524522 Zoozve (2002 VE68)" and zoozve.is_potentially_hazardous
+    assert zoozve.estimated_diameter_max_km == pytest.approx(0.25)
+    assert zoozve.approach.miss_distance_km == pytest.approx(6_462_577.195523135)
+    assert cache.upcoming_approaches(date(2026, 11, 22), date(2040, 1, 1), limit=1) == upcoming[:1]
+
+
 # --------------------------------------------------------------------------- #
 # Alerts (anomaly_alerts)
 # --------------------------------------------------------------------------- #

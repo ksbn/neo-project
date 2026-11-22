@@ -308,3 +308,19 @@ class AlertRecorder:
 
     def run_finished(self, stats: PipelineStats, error: NeoError | None) -> None:
         pass
+
+
+class SeenAsteroids:
+    """Collects the asteroids a run fetched, in the order they came, so their orbits can be cached afterwards."""
+
+    def __init__(self) -> None:
+        self.ids: list[str] = []
+
+    def run_started(self, stats: PipelineStats) -> None:
+        pass
+
+    def window_done(self, report: WindowReport) -> None:
+        self.ids.extend(obs.neo_reference_id for obs in report.observations)
+
+    def run_finished(self, stats: PipelineStats, error: NeoError | None) -> None:
+        pass

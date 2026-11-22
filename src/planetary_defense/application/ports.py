@@ -24,6 +24,7 @@ from planetary_defense.domain.models import (
     Overview,
     PipelineStatus,
     Severity,
+    UpcomingApproach,
     UpsertResult,
 )
 
@@ -99,3 +100,9 @@ class AlertReader(Protocol):
     """Reads stored alerts, most urgent first (read side)."""
 
     def recent_alerts(self, min_severity: Severity, limit: int) -> list[AnomalyAlert]: ...
+
+
+class UpcomingReader(Protocol):
+    """Predicted Earth passes of the asteroids whose orbits are cached (read side)."""
+
+    def upcoming_approaches(self, since: date, until: date, limit: int) -> list[UpcomingApproach]: ...

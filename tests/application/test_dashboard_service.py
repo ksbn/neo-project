@@ -194,3 +194,48 @@ def test_threat_level_is_the_worst_alert_near_today():
     alerts = [alert(date(2026, 11, 1), Severity.CRITICAL), alert(date(2026, 11, 20), Severity.WATCH),
               alert(date(2026, 11, 28), Severity.WARNING)]
     assert threat_level(alerts, TODAY) is Severity.WARNING  # the November 1 critical is outside +-7 days
+
+
+# --------------------------------------------------------------------------- #
+# Upcoming approaches: predicted passes scored before they happen
+# --------------------------------------------------------------------------- #
+
+
+class StubUpcoming:
+    def __init__(self, passes=None, fail: bool = False) -> None:
+        self.passes, self.fail, self.asked = passes or [], fail, None
+
+    def upcoming_approaches(self, since, until, limit):
+        self.asked = (since, until, limit)
+        if self.fail:
+            raise StorageError('relation "orbit_approaches" does not exist')
+        return self.passes
+
+
+def a_pass(ref: str, day: date, ld: float, hazardous: bool = False):
+    from planetary_defense.domain.models import ApproachSummary, UpcomingApproach
+
+    return UpcomingApproach(ref, f"({ref})", hazardous, 0.1, 0.2,
+                            ApproachSummary(day, "Earth", 12.0, ld * LUNAR_DISTANCE_KM))
+
+
+def test_stored_view_scores_predicted_passes_with_the_same_rules():
+    passes = [a_pass("near", date(2026, 12, 1), 0.8), a_pass("far", date(2027, 5, 1), 40.0)]
+    upcoming = StubUpcoming(passes)
+    v = view_from_store(StubReader(), StubRuns(), StubAlerts(), today=TODAY, upcoming=upcoming)
+
+    assert v.upcoming == passes
+    assert upcoming.asked is not None and upcoming.asked[0] == TODAY and upcoming.asked[1].year == TODAY.year + 10
+    assert [(a.neo_reference_id, a.severity, a.close_approach_date) for a in v.upcoming_alerts] == [
+        ("near", Severity.CRITICAL, date(2026, 12, 1))]  # inside the Moon's orbit, flagged ahead of time
+
+
+def test_unavailable_predictions_leave_the_stored_view_intact():
+    v = view_from_store(StubReader(), StubRuns(), StubAlerts(), today=TODAY, upcoming=StubUpcoming(fail=True))
+    assert v.upcoming == [] and v.upcoming_alerts == [] and v.history_available
+
+
+def test_a_predicted_pass_next_week_raises_the_threat_level():
+    passes = [a_pass("near", TODAY.replace(day=TODAY.day + 5), 3.0)]
+    v = view_from_store(StubReader(), StubRuns(), StubAlerts(), today=TODAY, upcoming=StubUpcoming(passes))
+    assert threat_level([*v.alerts, *v.upcoming_alerts], TODAY) is Severity.WARNING

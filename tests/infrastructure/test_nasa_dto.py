@@ -150,3 +150,29 @@ def test_a_hyperbolic_orbit_is_not_drawable():
 def test_garbled_orbital_data_is_a_contract_error():
     with pytest.raises(FeedContractError, match="inclination"):
         parse_orbit(make_neo_detail(inclination="not a number"))
+
+
+def _approach(day: str, body: str = "Earth", km: str = "6018477.458", km_s: str = "8.717") -> dict:
+    """One /neo/{id} close_approach_data entry, shaped like NASA's (extra fields ignored)."""
+    return {"close_approach_date": day, "close_approach_date_full": f"{day} 09:06", "orbiting_body": body,
+            "miss_distance": {"kilometers": km, "lunar": "15.65"}, "relative_velocity": {"kilometers_per_second": km_s}}
+
+
+def test_orbit_keeps_every_earth_approach_oldest_first(caplog):
+    detail = make_neo_detail()
+    detail["close_approach_data"] = [
+        _approach("2034-10-31", km="6462577.195"), _approach("1902-11-24", body="Merc"), _approach("2026-11-02"),
+        {"close_approach_date": "2050-01-01"},  # malformed: skipped, not fatal
+    ]
+    orbit = parse_orbit(detail)
+    assert orbit.approaches is not None
+    assert [a.close_approach_date.isoformat() for a in orbit.approaches] == ["2026-11-02", "2034-10-31"]
+    assert orbit.approaches[1].miss_distance_km == pytest.approx(6_462_577.195)
+    assert orbit.next_approach(date(2026, 11, 22)) == orbit.approaches[1]
+    assert orbit.next_approach(date(2035, 1, 1)) is None
+    assert "Skipped 1 malformed close approaches of asteroid 2524522" in caplog.text
+
+
+def test_an_orbit_without_listed_approaches_knows_it_has_none():
+    orbit = parse_orbit(make_neo_detail())
+    assert orbit.approaches == ()  # known to be empty, unlike None (not fetched)

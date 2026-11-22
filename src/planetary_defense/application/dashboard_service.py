@@ -16,7 +16,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from typing import Final, Protocol
 
-from planetary_defense.application.ports import AlertReader, AsteroidReader, FeedSource, RunReader
+from planetary_defense.application.ports import AlertReader, AsteroidReader, FeedSource, RunReader, UpcomingReader
 from planetary_defense.domain.anomaly_rules import Rule, default_rules, evaluate
 from planetary_defense.domain.errors import NeoError
 from planetary_defense.domain.models import (
@@ -27,6 +27,7 @@ from planetary_defense.domain.models import (
     OrbitLookup,
     Overview,
     Severity,
+    UpcomingApproach,
     latest,
 )
 from planetary_defense.domain.units import km_to_ld
@@ -36,6 +37,8 @@ logger = logging.getLogger(__name__)
 MAX_ROWS: Final = 5_000
 MAX_ALERTS: Final = 200
 TREND_DAYS: Final = 14
+UPCOMING_HORIZON: Final = timedelta(days=3_653)  # ten years
+MAX_UPCOMING: Final = 1_000
 # Live fallback covers today and the 2 days before it, matching scripts/daily_pipeline.sh.
 API_FALLBACK_DAYS: Final = 2
 
@@ -47,15 +50,19 @@ def view_from_store(
     limit: int = MAX_ROWS,
     alert_limit: int = MAX_ALERTS,
     today: date | None = None,
+    upcoming: UpcomingReader | None = None,
+    rules: Iterable[Rule] | None = None,
 ) -> AsteroidView:
-    """Totals over the whole table, the newest ``limit`` rows, the pipeline's status and the stored alerts.
+    """Totals over the whole table, the newest ``limit`` rows, the pipeline's status, the stored alerts,
+    and the predicted passes of cached orbits scored by ``rules``.
 
-    Status and alerts are secondary: if only they fail (for example before their
-    migrations ran), the asteroid data is still shown rather than falling back
-    to the live API.
+    Status, alerts and predictions are secondary: if only they fail (for example
+    before their migrations ran), the asteroid data is still shown rather than
+    falling back to the live API.
     """
+    today = today or date.today()
     overview, rows = reader.overview(), reader.list_recent(limit)
-    since = (today or date.today()) - timedelta(days=TREND_DAYS - 1)
+    since = today - timedelta(days=TREND_DAYS - 1)
     trend = reader.daily_approaches(since)
     try:
         status = runs.pipeline_status()
@@ -67,9 +74,24 @@ def view_from_store(
     except NeoError as exc:
         logger.warning("Alerts unavailable: %s", exc)
         stored_alerts = []
+    passes = _upcoming(upcoming, today) if upcoming is not None else []
     return AsteroidView(
-        overview=overview, rows=rows, status=status, history_available=True, alerts=stored_alerts, trend=trend
+        overview=overview, rows=rows, status=status, history_available=True, alerts=stored_alerts, trend=trend,
+        upcoming=passes, upcoming_alerts=score_upcoming(passes, rules if rules is not None else default_rules()),
     )
+
+
+def _upcoming(reader: UpcomingReader, today: date) -> list[UpcomingApproach]:
+    try:
+        return reader.upcoming_approaches(today, today + UPCOMING_HORIZON, MAX_UPCOMING)
+    except NeoError as exc:
+        logger.warning("Upcoming approaches unavailable: %s", exc)
+        return []
+
+
+def score_upcoming(passes: Iterable[UpcomingApproach], rules: Iterable[Rule]) -> list[AnomalyAlert]:
+    """The alerts the anomaly rules raise for predicted passes: an early warning, before the pass happens."""
+    return evaluate((p.observation() for p in passes), rules)
 
 
 def view_from_feed(

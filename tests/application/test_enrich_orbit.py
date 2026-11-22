@@ -5,11 +5,12 @@ Fakes only: an in-memory cache, a scripted NASA source and a fixed clock.
 
 import logging
 import math
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
-from planetary_defense.application.enrich_orbit import OrbitEnricher, warm_orbits
+from planetary_defense.application.enrich_orbit import OrbitEnricher, warm_orbits, warm_targets
 from planetary_defense.domain.errors import OrbitUnavailable, StorageError, UpstreamRateLimited, UpstreamUnavailable
 from planetary_defense.domain.models import AnomalyAlert, CachedOrbit, OrbitOrigin, Severity
 from planetary_defense.domain.units import km_to_ld
@@ -152,36 +153,59 @@ def an_alert(ref: str, severity: Severity) -> AnomalyAlert:
     return AnomalyAlert("close_approach", severity, ref, f"({ref})", date(2026, 11, 20), "close", 3.0, 5.0)
 
 
-def test_warm_orbits_fetches_warning_and_worse_once_each_most_urgent_first():
-    cache, source = cached(timedelta(days=1)), FakeOrbitSource()  # Zoozve already cached
+def test_warm_targets_put_the_most_urgent_alerts_first_then_the_rest_once_each():
     alerts = [an_alert("1", Severity.WARNING), an_alert("2", Severity.CRITICAL), an_alert("1", Severity.WARNING),
-              an_alert(ZOOZVE, Severity.WARNING), an_alert("3", Severity.WATCH)]
+              an_alert("3", Severity.WATCH)]
+    assert warm_targets(alerts, ["9", "3", "1", "8"]) == ["2", "1", "9", "3", "8"]  # watch is below the bar
+    assert warm_targets(alerts, [], min_severity=Severity.WATCH) == ["2", "1", "3"]
 
-    result = warm_orbits(enricher(cache, source), alerts)
 
-    assert source.calls == ["2", "1"]  # critical first; Zoozve was a cache hit; watch is below the bar
+def test_warm_orbits_fetches_misses_once_each_and_counts_cache_hits():
+    cache, source = cached(timedelta(days=1)), FakeOrbitSource()  # Zoozve already cached
+
+    result = warm_orbits(enricher(cache, source), ["2", "1", ZOOZVE, "1"])
+
+    assert source.calls == ["2", "1"]
     assert (result.fetched, result.cached, result.failed) == (2, 1, 0)
 
 
-def test_warm_orbits_respects_the_limit_and_the_severity_bar():
+def test_warm_orbits_respects_the_limit():
     source = FakeOrbitSource()
-    alerts = [an_alert(str(i), Severity.WATCH) for i in range(5)]
-    result = warm_orbits(enricher(InMemoryOrbitCache(), source), alerts, min_severity=Severity.WATCH, limit=3)
+    result = warm_orbits(enricher(InMemoryOrbitCache(), source), [str(i) for i in range(5)], limit=3)
     assert source.calls == ["0", "1", "2"] and result.fetched == 3
 
 
 def test_warm_orbits_never_raises_on_operational_failures(caplog):
     source = FakeOrbitSource(fail=UpstreamUnavailable("NASA down"))
     with caplog.at_level(logging.WARNING):
-        result = warm_orbits(enricher(InMemoryOrbitCache(), source), [an_alert("1", Severity.CRITICAL)])
+        result = warm_orbits(enricher(InMemoryOrbitCache(), source), ["1"])
     assert (result.fetched, result.failed) == (0, 1)
     assert "Could not warm the orbit of 1" in caplog.text
 
 
 def test_warm_orbits_counts_a_failed_refresh_of_a_stale_orbit_as_failed():
     source = FakeOrbitSource(fail=UpstreamUnavailable("NASA down"))
-    result = warm_orbits(enricher(cached(timedelta(days=60)), source), [an_alert(ZOOZVE, Severity.CRITICAL)])
+    result = warm_orbits(enricher(cached(timedelta(days=60)), source), [ZOOZVE])
     assert (result.fetched, result.cached, result.failed) == (0, 0, 1)
+
+
+def test_an_orbit_cached_before_approaches_were_stored_is_refreshed_once():
+    cache, source = InMemoryOrbitCache(), FakeOrbitSource()
+    cache.orbits[ZOOZVE] = CachedOrbit(orbit=replace(zoozve_orbit(), approaches=None), fetched_at=NOW)
+
+    first = enricher(cache, source).lookup(ZOOZVE)
+    second = enricher(cache, source).lookup(ZOOZVE)
+
+    assert source.calls == [ZOOZVE]
+    assert (first.origin, second.origin) == (OrbitOrigin.NASA, OrbitOrigin.CACHE)
+    assert second.orbit.approaches == zoozve_orbit().approaches
+
+
+def test_without_nasa_an_orbit_lacking_approaches_is_still_served():
+    cache, source = InMemoryOrbitCache(), FakeOrbitSource(fail=UpstreamUnavailable("NASA down"))
+    cache.orbits[ZOOZVE] = CachedOrbit(orbit=replace(zoozve_orbit(), approaches=None), fetched_at=NOW)
+    lookup = enricher(cache, source).lookup(ZOOZVE)
+    assert lookup.origin is OrbitOrigin.STALE_CACHE and lookup.orbit.approaches is None
 
 
 # --------------------------------------------------------------------------- #

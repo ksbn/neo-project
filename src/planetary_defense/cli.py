@@ -40,7 +40,7 @@ from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import date
 from enum import IntEnum
 
-from planetary_defense.application.enrich_orbit import OrbitEnricher, warm_orbits
+from planetary_defense.application.enrich_orbit import OrbitEnricher, warm_orbits, warm_targets
 from planetary_defense.application.ingest_feed import (
     AlertRecorder,
     DryRunStore,
@@ -49,6 +49,7 @@ from planetary_defense.application.ingest_feed import (
     LogObserver,
     PipelineStats,
     RunObserver,
+    SeenAsteroids,
     WindowFailed,
 )
 from planetary_defense.application.ports import AlertStore, AsteroidStore, FeedSource, OrbitCache, OrbitSource, RunLog
@@ -63,7 +64,6 @@ from planetary_defense.domain.errors import (
     UpstreamError,
     UpstreamRequestError,
 )
-from planetary_defense.domain.models import AnomalyAlert, Severity
 from planetary_defense.infrastructure.db import connect
 from planetary_defense.infrastructure.nasa_client import NeoWsClient
 from planetary_defense.infrastructure.repository import (
@@ -156,6 +156,9 @@ def open_postgres_alert_store(settings: Settings) -> Iterator[AlertRepository]:
         yield AlertRepository(conn)
 
 
+DEFAULT_WARM_LIMIT = 100
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Load NASA NeoWs asteroid data into PostgreSQL.",
@@ -177,7 +180,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--no-warm-orbits",
         action="store_true",
-        help="Don't pre-fetch orbits (NASA /neo/{id}) for this run's warning and critical alerts.",
+        help="Don't cache orbits and predicted passes (NASA /neo/{id}) for this run's asteroids.",
+    )
+    parser.add_argument(
+        "--warm-limit",
+        type=int,
+        default=DEFAULT_WARM_LIMIT,
+        metavar="N",
+        help=f"Cache orbits for at most N of this run's asteroids, warning and critical alerts first "
+        f"(default: {DEFAULT_WARM_LIMIT}). Already-fresh orbits cost no NASA call.",
     )
     parser.add_argument(
         "--log-level",
@@ -189,6 +200,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
     args.start_date = args.start_date or args.end_date or date.today()
     args.end_date = args.end_date or args.start_date
+    if args.warm_limit < 0:
+        parser.error("--warm-limit must not be negative")
     if args.end_date < args.start_date:
         parser.error(f"--end-date ({args.end_date}) is before --start-date ({args.start_date})")  # exits with 2
     return args
@@ -219,20 +232,22 @@ def _exit_code_for_failure(exc: WindowFailed, stats: PipelineStats, dry_run: boo
 
 def _warm_orbits(
     settings: Settings,
-    alerts: list[AnomalyAlert],
+    targets: list[str],
+    limit: int,
     open_orbit_cache: OrbitCacheFactory,
     open_orbit_source: OrbitSourceFactory,
 ) -> None:
-    """Cache the orbits of this run's warning-or-worse asteroids, so their 3D view opens instantly.
+    """Cache the orbits and predicted passes of this run's asteroids (most urgent first), so their 3D view
+    opens instantly and the upcoming-approaches panel knows when they pass next.
 
     Best effort: the data is already saved, so nothing here changes the exit code.
     """
-    if not any(a.severity >= Severity.WARNING for a in alerts):
+    if not targets or limit == 0:
         return
     try:
         with open_orbit_cache(settings) as cache, open_orbit_source(settings) as source:
             enricher = OrbitEnricher(cache, source, max_age=settings.orbit_cache_max_age())
-            warm_orbits(enricher, alerts)
+            warm_orbits(enricher, targets, limit=limit)
     except NeoError as exc:
         logger.warning("Skipped warming orbits: %s", exc)
 
@@ -276,12 +291,15 @@ def main(
                 observers.append(alert_recorder)
             if run_log is not None:
                 observers.append(IngestionRunRecorder(run_log))
+            seen = SeenAsteroids()
+            observers.append(seen)
             service = IngestService(feed, store, observers)
             service.run(args.start_date, args.end_date, stats)
             if not args.dry_run:
                 _log_table_size(store)
             if alert_recorder is not None and not args.no_warm_orbits:
-                _warm_orbits(settings, alert_recorder.alerts, open_orbit_cache, open_orbit_source)
+                _warm_orbits(settings, warm_targets(alert_recorder.alerts, seen.ids), args.warm_limit,
+                             open_orbit_cache, open_orbit_source)
     except WindowFailed as exc:
         return _exit_code_for_failure(exc, stats, args.dry_run)
     except NeoError as exc:
