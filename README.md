@@ -17,7 +17,8 @@ By combining this API with a robust data pipeline and automated storage layer, I
 * **Language:** Python 3.14 (`requests`, `pydantic`, `psycopg`, `python-dotenv`)
 * **Database:** PostgreSQL 15 (Dockerized), schema managed with [dbmate](https://github.com/amacneil/dbmate) migrations
 * **Testing:** `pytest`, `responses`
-* **Dashboard:** Streamlit (`app.py`)
+* **Dashboard:** Streamlit (`src/planetary_defense/ui/app.py`, started through the root `app.py`)
+* **Packaging & tooling:** `pyproject.toml` (setuptools), `ruff`, `pyright`
 * **Infrastructure:** Docker Compose
 
 ---
@@ -48,7 +49,7 @@ This starts PostgreSQL and runs the one-shot `migrate` service, which applies an
 python3 -m venv venv
 source venv/bin/activate
 pip install --upgrade pip
-pip install -r requirements.txt        # add -dev to also install test tools
+pip install -e ".[dev]"                # the package (editable) plus test, lint and type-check tools
 ```
 
 ### 4. Run the Pipeline
@@ -58,7 +59,7 @@ Fetch and upsert asteroid data for today:
 scripts/run_pipeline.sh
 ```
 
-This applies any pending migrations first, then runs `pipeline.py`. Arguments are passed through, so you can give a custom date range (any length; it is fetched in 7-day windows, NASA's limit):
+This applies any pending migrations first, then runs the CLI (`python -m planetary_defense.cli`). Arguments are passed through, so you can give a custom date range (any length; it is fetched in 7-day windows, NASA's limit):
 
 ```bash
 scripts/run_pipeline.sh --start 2026-11-10 --end 2026-11-15
@@ -70,11 +71,11 @@ The schema step and the data step are separate programs, and `run_pipeline.sh` i
 | Piece | Job | Knows about |
 |---|---|---|
 | `scripts/migrate.sh apply\|check` | Bring the schema up to date, or check that it is | Docker, dbmate |
-| `pipeline.py` | Fetch, validate, upsert | A database connection, not migrations |
+| `planetary_defense.cli` | Fetch, validate, upsert | A database connection, not migrations |
 | `scripts/run_pipeline.sh` | Run the schema step, then the data step | The order of the two steps |
 | `scripts/daily_pipeline.sh` | Wait for the network and Docker, then call `run_pipeline.sh` | Mac sleep/wake |
 
-`MIGRATIONS=check scripts/run_pipeline.sh` never changes the schema and refuses to run on an outdated one. `MIGRATIONS=skip` leaves out the schema step entirely, for example for a `--dry-run` without Docker. `python pipeline.py ...` still works on its own, but it doesn't apply migrations.
+`MIGRATIONS=check scripts/run_pipeline.sh` never changes the schema and refuses to run on an outdated one. `MIGRATIONS=skip` leaves out the schema step entirely, for example for a `--dry-run` without Docker. `neo-pipeline ...` (or `python -m planetary_defense.cli ...`) runs the data step on its own, without applying migrations.
 
 `--start`/`--end` are short forms of `--start-date`/`--end-date`. Re-running any range is safe: unchanged rows are left alone, and an older close approach never overwrites a newer one.
 
@@ -115,23 +116,32 @@ Failures are not cached, so the page recovers as soon as a source is back, but a
 
 ## Code Layout
 
-| Module | Layer | Job |
-|---|---|---|
-| `pipeline.py` | Entry point | CLI arguments, builds the dependencies, maps errors to exit codes |
-| `app.py` | Entry point | Dashboard wiring (sources, caches, circuit breakers) and Streamlit rendering |
-| `ui_messages.py` | Entry point | How the dashboard words each error (`UI_MESSAGES`) |
-| `ingest.py` | Application service | `IngestService` (fetch, validate, store window by window), `RunObserver`s such as `LogObserver`, `DryRunStore` |
-| `dashboard_data.py` | Application service | Builds the dashboard's `AsteroidView` from a store or a feed; `FallbackReader` |
-| `resilience.py` | Application service | `CircuitBreaker` for interactive callers |
-| `ports.py` | Interfaces | `FeedSource`, `AsteroidStore`, `AsteroidReader` protocols; they mention only domain types |
-| `domain.py` | Domain | `Asteroid`, `CloseApproach`, `Observation`, the `latest()` rule, `FeedBatch`, `date_windows`, read models |
-| `errors.py` | Domain | The `NeoError` hierarchy (classification only) |
-| `config.py` | Infrastructure | `Settings`: the only code that reads `.env` / the environment |
-| `client.py` | Adapter | NASA HTTP client, retry profiles, HTTP errors to typed errors |
-| `models.py` | Adapter | NASA JSON shapes, validation, mapping to `Observation` |
-| `database.py` | Adapter | PostgreSQL connection and `AsteroidRepository` (write: `save`; read: `overview`, `list_recent`) |
+The code is one package, `src/planetary_defense/`, in four layers. Each layer imports only from the layers inside it: `domain` imports nothing from the project (and no Streamlit, HTTP or SQL libraries), `application` imports only `domain`, and the entry points (`cli.py`, `ui/app.py`) are the only modules that pick concrete adapters.
 
-Adapters translate library exceptions (`requests`, `pydantic`, `psycopg`) into `NeoError` subclasses. Entry points catch only `NeoError`; anything else is a bug and crashes with a traceback instead of being reported as an outage. How an error is presented is decided by each entry point: `pipeline.CLI_OUTCOMES` (exit code and log label) and `ui_messages.UI_MESSAGES` (dashboard text).
+```text
+app.py                      # `streamlit run app.py` starts ui/app.py
+src/planetary_defense/
+├── config.py               # Settings: the only code that reads .env / the environment
+├── cli.py                  # Pipeline entry point: arguments, wiring, CLI_OUTCOMES (exit codes)
+├── domain/
+│   ├── models.py           # Asteroid, CloseApproach, Observation, latest(), FeedBatch, runs, read models
+│   └── errors.py           # The NeoError hierarchy (classification only)
+├── application/
+│   ├── ports.py            # Protocols: FeedSource, AsteroidStore, AsteroidReader, RunLog, RunReader
+│   ├── ingest_feed.py      # IngestService, LogObserver, IngestionRunRecorder, DryRunStore
+│   └── dashboard_service.py# Dashboard views from a store or a feed; FallbackReader
+├── infrastructure/
+│   ├── nasa_client.py      # NASA HTTP client: retry profiles, HTTP errors to typed errors
+│   ├── nasa_dto.py         # NASA JSON shapes, validation, mapping to Observation
+│   ├── db.py               # PostgreSQL connections
+│   ├── repository.py       # AsteroidRepository, IngestionRunRepository
+│   └── error_boundary.py   # CircuitBreaker for interactive callers
+└── ui/
+    ├── app.py              # Dashboard wiring (sources, caches, breakers) and rendering
+    └── messages.py         # How the dashboard words errors and pipeline status
+```
+
+Adapters translate library exceptions (`requests`, `pydantic`, `psycopg`) into `NeoError` subclasses. Entry points catch only `NeoError`; anything else is a bug and crashes with a traceback instead of being reported as an outage. How an error is presented is decided by each entry point: `cli.CLI_OUTCOMES` (exit code and log label) and `ui.messages.UI_MESSAGES` (dashboard text).
 
 Which close approach is kept is decided in one place, `domain.latest()`. The parser keeps every approach it sees, and the repository stores the newest per asteroid, so keeping the full history later only needs a new table and a second write.
 
@@ -140,22 +150,15 @@ Which close approach is kept is decided in one place, `domain.latest()`. The par
 ## 🧪 Running Tests
 
 ```bash
-pip install -r requirements-dev.txt
-pyright     # type-check; enforces that adapters and test fakes match ports.py
+pip install -e ".[dev]"
+ruff check .    # lint
+pyright         # type-check; enforces that adapters and test fakes match application/ports.py
 pytest
 ```
 
-* `tests/test_domain.py`: the `latest()` rule, date windows, strict entities.
-* `tests/test_models.py`: Pydantic validation of NeoWs payloads and mapping to observations.
-* `tests/test_client.py`: the HTTP client, with NASA simulated by `responses` (no real API calls): errors, retries, timeouts, rate limits, retry profiles.
-* `tests/test_config.py`: settings validation.
-* `tests/test_database.py`: the idempotent upsert, totals and the dashboard query against PostgreSQL.
-* `tests/test_ingest.py`: `IngestService` and its observers with in-memory fakes.
-* `tests/test_dashboard_data.py`: the dashboard's views and fallback, without Streamlit.
-* `tests/test_resilience.py`: the circuit breaker and the dashboard's error wording.
-* `tests/test_ui_messages.py`: the dashboard's pipeline-status wording.
-* `tests/test_ports.py`: protocol conformance (checked by pyright).
-* `tests/test_pipeline.py`: argument parsing and exit codes end to end.
+Run `pyright` with the venv activated (or `pyright --pythonpath venv/bin/python`), so it sees the installed libraries.
+
+Tests mirror the package: `tests/domain/`, `tests/application/`, `tests/infrastructure/`, `tests/ui/`, plus `tests/test_cli.py` (arguments and exit codes end to end) and `tests/test_config.py`. Shared NeoWs payload builders live in `tests/support.py`, and in-memory fakes for every port in `tests/fakes.py`.
 
 Database tests use the PostgreSQL from `.env` but never touch your data: they build a throwaway schema from `db/migrations/`, roll back every test, and drop the schema afterwards. If PostgreSQL isn't running, they are skipped.
 
@@ -182,7 +185,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#5-how-the-data-is-stored) for ho
 Each file has a `-- migrate:up` section and a `-- migrate:down` section. Rules:
 
 * Never edit a migration that has already been applied; add a new one.
-* If you change a `NUMERIC` column, update the matching limit in `models.py`. A test fails if they drift apart.
+* If you change a `NUMERIC` column, update the matching limit in `src/planetary_defense/infrastructure/nasa_dto.py`. A test fails if they drift apart.
 * Prefer changes that don't lock or rewrite the table: add nullable columns, use `CREATE INDEX CONCURRENTLY` (with `-- migrate:up transaction:false`), and add `NOT NULL` via a `CHECK ... NOT VALID` constraint that is validated afterwards.
 * Put only **one** `CONCURRENTLY` statement in a `transaction:false` file. dbmate sends the whole section at once, and Postgres runs multiple statements as a single transaction, which `CONCURRENTLY` rejects. Two indexes means two files.
 * Files are applied in timestamp order, and `DBMATE_STRICT` rejects a file older than one already applied. If that happens after a merge, rename your file to a new timestamp (`migrate new` gives you one).
@@ -193,4 +196,4 @@ Each file has a `-- migrate:up` section and a `-- migrate:down` section. Rules:
 
 1. applies the base branch's migrations, then the PR's with `--strict`, which fails if the PR adds a migration that sorts before one already on the base branch;
 2. rolls every migration back and applies them again, which checks that each `-- migrate:down` really undoes its `up`;
-3. type-checks the code with pyright and runs the test suite against the migrated database.
+3. lints with ruff, type-checks with pyright and runs the test suite against the migrated database.

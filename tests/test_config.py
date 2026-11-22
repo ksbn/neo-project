@@ -2,8 +2,8 @@
 
 import pytest
 
-from config import DbConfig, Settings
-from errors import ConfigError
+from planetary_defense.config import DbConfig, Settings
+from planetary_defense.domain.errors import ConfigError
 
 DB = {"DB_NAME": "neo", "DB_USER": "u", "DB_PASSWORD": "secret"}
 
