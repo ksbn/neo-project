@@ -1,9 +1,10 @@
-"""Data access for the Streamlit dashboard, kept free of Streamlit so it can be unit-tested.
+"""Dashboard query service: builds an :class:`domain.AsteroidView` from whichever source works.
 
-The dashboard reads PostgreSQL first and falls back to the live NASA API. The
-order is data (:class:`FallbackReader` takes a list of :class:`Source`), not
-hard-coded control flow. Only :class:`errors.NeoError` triggers the fallback;
-any other exception is a bug and propagates.
+No Streamlit, pandas, psycopg or requests here. The sources are injected by
+``app.py`` (the dashboard's composition root), and the fallback order is
+data (:class:`FallbackReader` takes a list of :class:`Source`). Only
+:class:`errors.NeoError` triggers the fallback; any other exception is a bug
+and propagates.
 """
 
 from __future__ import annotations
@@ -12,49 +13,52 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+from decimal import Decimal
 from typing import Final
 
-import pandas as pd
-
-from client import INTERACTIVE, NeoWsClient
-from config import Settings
-from database import SUMMARY_COLUMNS, AsteroidRepository, connect
+from domain import AsteroidSummary, AsteroidView, Overview, latest
 from errors import NeoError
+from ports import AsteroidReader, FeedSource
 
 logger = logging.getLogger(__name__)
 
-COLUMNS: Final = list(SUMMARY_COLUMNS)
-NUMERIC_COLUMNS: Final = ["estimated_diameter_min_km", "estimated_diameter_max_km", "miss_distance_km"]
 MAX_ROWS: Final = 5_000
 # Live fallback covers today and the 2 days before it, matching scripts/daily_pipeline.sh.
 API_FALLBACK_DAYS: Final = 2
 
 
-def normalize(df: pd.DataFrame) -> pd.DataFrame:
-    """Give both sources the same columns and dtypes (Postgres NUMERIC arrives as Decimal)."""
-    df = df.reindex(columns=COLUMNS)
-    for col in NUMERIC_COLUMNS:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    df["is_potentially_hazardous"] = df["is_potentially_hazardous"].astype("boolean").fillna(False).astype(bool)
-    df["close_approach_date"] = pd.to_datetime(df["close_approach_date"], errors="coerce").dt.date  # pyright: ignore[reportAttributeAccessIssue]
-    return df
+def view_from_store(reader: AsteroidReader, limit: int = MAX_ROWS) -> AsteroidView:
+    """Totals over the whole table plus the newest ``limit`` rows."""
+    return AsteroidView(overview=reader.overview(), rows=reader.list_recent(limit))
 
 
-def read_database(settings: Settings, limit: int = MAX_ROWS) -> pd.DataFrame:
-    """Newest asteroids from PostgreSQL. Raises ConfigError or StorageError."""
-    with connect(settings.db(), connect_timeout=3, application_name="neo-dashboard") as conn:
-        rows = AsteroidRepository(conn).list_recent(limit)
-    return normalize(pd.DataFrame(rows, columns=COLUMNS))
+def view_from_feed(feed: FeedSource, today: date, days: int = API_FALLBACK_DAYS) -> AsteroidView:
+    """The last few days live from a feed, shaped like the stored view."""
+    batch = feed.fetch_records(today - timedelta(days=days), today)
+    rows = [
+        AsteroidSummary(
+            neo_reference_id=obs.neo_reference_id,
+            name=obs.asteroid.name,
+            estimated_diameter_min_km=_float(obs.asteroid.estimated_diameter_min_km),
+            estimated_diameter_max_km=_float(obs.asteroid.estimated_diameter_max_km),
+            is_potentially_hazardous=obs.asteroid.is_potentially_hazardous,
+            close_approach_date=obs.approach_date,
+            miss_distance_km=_float(obs.approach.miss_distance_km) if obs.approach else None,
+        )
+        for obs in latest(batch.observations)
+    ]
+    rows.sort(key=lambda r: (r.close_approach_date is not None, r.close_approach_date or date.min), reverse=True)
+    dates = [r.close_approach_date for r in rows if r.close_approach_date is not None]
+    overview = Overview(
+        total=len(rows),
+        hazardous=sum(r.is_potentially_hazardous for r in rows),
+        latest_approach=max(dates, default=None),
+    )
+    return AsteroidView(overview=overview, rows=rows)
 
 
-def read_nasa(settings: Settings, today: date | None = None) -> pd.DataFrame:
-    """The last few days live from NeoWs, with the interactive retry profile. Raises ConfigError or UpstreamError."""
-    end = today or date.today()
-    start = end - timedelta(days=API_FALLBACK_DAYS)
-    with NeoWsClient(settings.nasa_api_key(), profile=INTERACTIVE) as client:
-        result = client.fetch_records(start, end)
-    df = pd.DataFrame([r.model_dump(include=set(COLUMNS)) for r in result.records], columns=COLUMNS)
-    return normalize(df).sort_values("close_approach_date", ascending=False, na_position="last")
+def _float(value: Decimal | None) -> float | None:
+    return float(value) if value is not None else None
 
 
 @dataclass(frozen=True)
@@ -62,33 +66,38 @@ class Source:
     """One place the dashboard can read from."""
 
     label: str
-    read: Callable[[], pd.DataFrame]
+    read: Callable[[], AsteroidView]
     empty_hint: str = "returned no asteroids"
 
 
 @dataclass(frozen=True)
 class LoadResult:
-    data: pd.DataFrame
+    view: AsteroidView | None
     source: str | None
     diagnostics: list[str] = field(default_factory=list)
 
 
 class FallbackReader:
-    """Try each source in order; return the first non-empty result."""
+    """Try each source in order; return the first non-empty view.
 
-    def __init__(self, *sources: Source) -> None:
+    ``describe`` turns an error into user-facing text; the presentation is
+    owned by the entry point (see ``ui_messages.describe``).
+    """
+
+    def __init__(self, *sources: Source, describe: Callable[[NeoError], str] = str) -> None:
         self._sources = sources
+        self._describe = describe
 
     def load(self) -> LoadResult:
         diagnostics: list[str] = []
         for src in self._sources:
             try:
-                df = src.read()
+                view = src.read()
             except NeoError as exc:
                 logger.warning("%s failed: %s", src.label, exc)  # full detail stays in the server log
-                diagnostics.append(f"{src.label}: {exc.user_message}")
+                diagnostics.append(f"{src.label}: {self._describe(exc)}")
                 continue
-            if not df.empty:
-                return LoadResult(df, src.label, diagnostics)
+            if not view.is_empty:
+                return LoadResult(view, src.label, diagnostics)
             diagnostics.append(f"{src.label}: {src.empty_hint}")
-        return LoadResult(normalize(pd.DataFrame(columns=COLUMNS)), None, diagnostics)
+        return LoadResult(None, None, diagnostics)

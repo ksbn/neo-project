@@ -15,9 +15,8 @@ so it never appears in URLs, exception messages or urllib3 debug logs.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date
 from types import TracebackType
 from typing import Any, Final, Self
 from urllib.parse import urlsplit
@@ -28,14 +27,16 @@ from urllib3.exceptions import MaxRetryError, NameResolutionError, NewConnection
 from urllib3.exceptions import TimeoutError as Urllib3TimeoutError
 from urllib3.util.retry import Retry
 
+from domain import FeedBatch
 from errors import (
     FeedContractError,
     UpstreamAuthError,
     UpstreamError,
     UpstreamRateLimited,
+    UpstreamRequestError,
     UpstreamUnavailable,
 )
-from models import ParseResult, parse_feed
+from models import parse_feed
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ MAX_FEED_DAYS: Final = 7
 RETRY_STATUS_CODES: Final = frozenset({429, 500, 502, 503, 504})
 # Upper bound on a server-supplied Retry-After; urllib3's own default is 6 hours.
 MAX_RETRY_AFTER_SECONDS: Final = 60.0
+DEFAULT_USER_AGENT: Final = "neo-pipeline/1.0"
 
 
 # Backwards-compatible name: catches every NASA failure, whatever its category.
@@ -66,24 +68,6 @@ BATCH: Final = RetryProfile(timeout=(5.0, 30.0), max_retries=5, respect_retry_af
 INTERACTIVE: Final = RetryProfile(timeout=(3.0, 8.0), max_retries=1, respect_retry_after=False)
 
 
-def date_chunks(start_date: date, end_date: date, max_days: int = MAX_FEED_DAYS) -> Iterator[tuple[date, date]]:
-    """Split an inclusive date range into consecutive windows of at most ``max_days`` days.
-
-    >>> list(date_chunks(date(2024, 1, 1), date(2024, 1, 10)))
-    [(datetime.date(2024, 1, 1), datetime.date(2024, 1, 7)), (datetime.date(2024, 1, 8), datetime.date(2024, 1, 10))]
-    """
-    if end_date < start_date:
-        raise ValueError(f"end_date ({end_date}) is before start_date ({start_date})")
-    if max_days < 1:
-        raise ValueError("max_days must be at least 1")
-
-    chunk_start = start_date
-    while chunk_start <= end_date:
-        chunk_end = min(chunk_start + timedelta(days=max_days - 1), end_date)
-        yield chunk_start, chunk_end
-        chunk_start = chunk_end + timedelta(days=1)
-
-
 class _CappedRetry(Retry):
     """Retry policy that never sleeps longer than MAX_RETRY_AFTER_SECONDS for a Retry-After header.
 
@@ -96,7 +80,9 @@ class _CappedRetry(Retry):
         return min(super().parse_retry_after(retry_after), MAX_RETRY_AFTER_SECONDS)
 
 
-def _build_session(max_retries: int, backoff_factor: float, respect_retry_after: bool) -> requests.Session:
+def _build_session(
+    max_retries: int, backoff_factor: float, respect_retry_after: bool, user_agent: str
+) -> requests.Session:
     """Create a session that retries idempotent GETs with exponential backoff."""
     retry = _CappedRetry(
         total=max_retries,
@@ -116,7 +102,7 @@ def _build_session(max_retries: int, backoff_factor: float, respect_retry_after:
     # Mount for both schemes so a plain-http base_url (e.g. a local test server) retries too.
     session.mount("https://", adapter)
     session.mount("http://", adapter)
-    session.headers.update({"Accept": "application/json", "User-Agent": "neo-pipeline/1.0"})
+    session.headers.update({"Accept": "application/json", "User-Agent": user_agent})
     return session
 
 
@@ -159,13 +145,16 @@ def _error_detail(response: requests.Response) -> str:
 
 
 class NeoWsClient:
-    """Client for the NeoWs ``/feed`` endpoint.
+    """Client for the NeoWs ``/feed`` endpoint. Satisfies :class:`ports.FeedSource`.
 
     Use as a context manager so the underlying HTTP session is closed::
 
         with NeoWsClient(settings.nasa_api_key()) as client:
-            result = client.fetch_records(date(2024, 1, 1), date(2024, 1, 7))
+            batch = client.fetch_records(date(2024, 1, 1), date(2024, 1, 7))
     """
+
+    #: Longest window ``fetch_records`` accepts; callers split ranges with ``domain.date_windows``.
+    max_window_days: int = MAX_FEED_DAYS
 
     def __init__(
         self,
@@ -176,6 +165,7 @@ class NeoWsClient:
         timeout: tuple[float, float] | None = None,
         max_retries: int | None = None,
         backoff_factor: float = 1.0,
+        user_agent: str = DEFAULT_USER_AGENT,
         session: requests.Session | None = None,
     ) -> None:
         """Create a client.
@@ -187,6 +177,7 @@ class NeoWsClient:
             timeout: ``(connect, read)`` timeouts in seconds for each attempt.
             max_retries: Maximum retry attempts for transient failures.
             backoff_factor: Multiplier for the exponential backoff between retries.
+            user_agent: Identifies the caller in NASA's logs (pipeline vs dashboard).
             session: Pre-configured session (mainly for tests); retries are not added to it.
         """
         if not api_key:
@@ -195,7 +186,9 @@ class NeoWsClient:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout or profile.timeout
         retries = profile.max_retries if max_retries is None else max_retries
-        self._session = session or _build_session(retries, backoff_factor, profile.respect_retry_after)
+        self._session = session or _build_session(
+            retries, backoff_factor, profile.respect_retry_after, user_agent
+        )
         self._session.headers["X-Api-Key"] = api_key
 
     def __enter__(self) -> Self:
@@ -223,14 +216,14 @@ class NeoWsClient:
         if end_date < start_date:
             raise ValueError(f"end_date ({end_date}) is before start_date ({start_date})")
         if (end_date - start_date).days >= MAX_FEED_DAYS:
-            raise ValueError(f"NeoWs feed range is limited to {MAX_FEED_DAYS} days; split it with date_chunks()")
+            raise ValueError(f"NeoWs feed range is limited to {MAX_FEED_DAYS} days; split it with domain.date_windows()")
 
         return self._get(
             "feed",
             params={"start_date": start_date.isoformat(), "end_date": end_date.isoformat()},
         )
 
-    def fetch_records(self, start_date: date, end_date: date) -> ParseResult:
+    def fetch_records(self, start_date: date, end_date: date) -> FeedBatch:
         """Fetch and validate one window: NASA's raw JSON never leaves the adapter.
 
         Raises:
@@ -275,7 +268,7 @@ class NeoWsClient:
                 raise UpstreamAuthError(f"{message} (check NASA_API_KEY in .env)", status_code=status)
             if status >= 500:
                 raise UpstreamUnavailable(message, status_code=status)
-            raise UpstreamError(message, status_code=status)
+            raise UpstreamRequestError(message, status_code=status)
 
         try:
             payload = response.json()

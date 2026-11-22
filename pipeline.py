@@ -18,13 +18,16 @@ Exit codes (see :class:`ExitCode`):
     3  NASA API unavailable or rate limited (retry later)
     4  database error
     5  partial run: some windows were committed before a later window failed
-    7  NASA answered in an unexpected format (schema change; retrying won't help)
+    7  NASA rejected the request (other HTTP 4xx) or answered in an unexpected format;
+       retrying won't help
     130 interrupted (Ctrl+C)
 
 An invalid or revoked NASA_API_KEY (HTTP 401/403) is a configuration error (1),
 not an outage (3). This module is the composition root: it reads settings once,
 builds the NASA client and the repository, hands them to
-:class:`ingest.IngestService`, and maps typed errors to exit codes.
+:class:`ingest.IngestService`, and maps typed errors to exit codes and log
+labels through :data:`CLI_OUTCOMES`. That table is the CLI's only knowledge of
+the error hierarchy.
 """
 
 from __future__ import annotations
@@ -35,17 +38,59 @@ import sys
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import date
+from enum import IntEnum
 
 from client import NeoWsClient
 from config import Settings
 from database import AsteroidRepository, connect
-from errors import ExitCode, FeedContractError, NeoError, StorageError, UpstreamAuthError
-from ingest import IngestService, PipelineStats, WindowFailed
+from errors import (
+    ConfigError,
+    FeedContractError,
+    NeoError,
+    StorageError,
+    UpstreamAuthError,
+    UpstreamError,
+    UpstreamRequestError,
+)
+from ingest import DryRunStore, IngestService, LogObserver, PipelineStats, WindowFailed
 from ports import AsteroidStore, FeedSource
 
-__all__ = ["ExitCode", "PipelineStats", "WindowFailed", "main", "parse_args"]
+__all__ = ["CLI_OUTCOMES", "ExitCode", "PipelineStats", "WindowFailed", "main", "outcome", "parse_args"]
 
 logger = logging.getLogger("pipeline")
+
+
+class ExitCode(IntEnum):
+    """Process exit codes (6 is reserved for ``scripts/migrate.sh``)."""
+
+    OK = 0
+    CONFIG_ERROR = 1
+    USAGE_ERROR = 2
+    API_UNAVAILABLE = 3
+    DATABASE_ERROR = 4
+    PARTIAL = 5
+    CONTRACT_ERROR = 7
+    INTERRUPTED = 130
+
+
+# Most specific class wins (see outcome()); every NeoError resolves through NeoError itself.
+CLI_OUTCOMES: dict[type[NeoError], tuple[ExitCode, str]] = {
+    ConfigError: (ExitCode.CONFIG_ERROR, "Configuration error"),
+    UpstreamAuthError: (ExitCode.CONFIG_ERROR, "NASA rejected the API key"),
+    UpstreamRequestError: (ExitCode.CONTRACT_ERROR, "NASA rejected the request"),
+    FeedContractError: (ExitCode.CONTRACT_ERROR, "NeoWs response did not match the expected format"),
+    UpstreamError: (ExitCode.API_UNAVAILABLE, "NASA API error"),
+    StorageError: (ExitCode.DATABASE_ERROR, "Database error"),
+    NeoError: (ExitCode.CONFIG_ERROR, "Unexpected operational error"),
+}
+
+
+def outcome(exc: NeoError) -> tuple[ExitCode, str]:
+    """Exit code and log label for ``exc``. Never raises, whatever the subclass."""
+    for kind in type(exc).__mro__:
+        if kind in CLI_OUTCOMES:
+            return CLI_OUTCOMES[kind]
+    raise AssertionError("unreachable: NeoError is always in CLI_OUTCOMES")  # pragma: no cover
 
 FeedFactory = Callable[[Settings], AbstractContextManager[FeedSource]]
 StoreFactory = Callable[[Settings], AbstractContextManager[AsteroidStore]]
@@ -67,7 +112,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Load NASA NeoWs asteroid data into PostgreSQL.",
         epilog="Exit codes: 0 ok, 1 config error (incl. rejected API key), 2 bad arguments, 3 NASA API unavailable, "
-        "4 database error, 5 partial run (re-run the same range to finish), 7 NASA format changed, 130 interrupted.",
+        "4 database error, 5 partial run (re-run the same range to finish), 7 NASA rejected the request or changed "
+        "its format, 130 interrupted.",
     )
     parser.add_argument(
         "--start-date", "--start",
@@ -103,27 +149,27 @@ def configure_logging(level: str) -> None:
     )
 
 
-_FAILURE_LABELS: dict[type[NeoError], str] = {
-    UpstreamAuthError: "NASA rejected the API key",
-    FeedContractError: "NeoWs response did not match the expected format",
-    StorageError: "Database error",
-}
-
-
 def _exit_code_for_failure(exc: WindowFailed, stats: PipelineStats, dry_run: bool) -> ExitCode:
     """Log a window failure and map it to an exit code."""
-    cause = exc.cause
-    label = next((text for kind, text in _FAILURE_LABELS.items() if isinstance(cause, kind)), "NASA API error")
-    logger.error("%s on %s..%s: %s", label, exc.window_start, exc.window_end, cause)
+    code, label = outcome(exc.cause)
+    logger.error("%s on %s..%s: %s", label, exc.window_start, exc.window_end, exc.cause)
 
     if stats.windows_done and not dry_run:
         logger.error(
-            "Partial run: %d of %d windows were committed before the failure. "
-            "Re-run the same range to finish (safe: the upsert is idempotent).",
-            stats.windows_done, stats.windows_total,
+            "Partial run: %d of %d windows were committed before the failure (cause: %s, exit code %d without "
+            "the partial progress). Re-run the same range to finish (safe: the upsert is idempotent).",
+            stats.windows_done, stats.windows_total, label, code,
         )
         return ExitCode.PARTIAL
-    return cause.exit_code
+    return code
+
+
+def _log_table_size(store: AsteroidStore) -> None:
+    """Informational only: every window is already committed, so a failure here must not change the exit code."""
+    try:
+        logger.info("Table now holds %d asteroids", store.count())
+    except StorageError as exc:
+        logger.warning("Could not count stored asteroids: %s", exc)
 
 
 def main(
@@ -141,27 +187,24 @@ def main(
     try:
         settings = settings or Settings.load()
         # Open the store before any NASA call so a database outage doesn't waste API quota.
-        with (
-            nullcontext(None) if args.dry_run else open_store(settings)
-        ) as store, open_feed(settings) as feed:
-            IngestService(feed, store).run(args.start_date, args.end_date, stats)
+        store_cm = nullcontext(DryRunStore()) if args.dry_run else open_store(settings)
+        with store_cm as store, open_feed(settings) as feed:
+            service = IngestService(feed, store, observers=[LogObserver(logger, dry_run=args.dry_run)])
+            service.run(args.start_date, args.end_date, stats)
+            if not args.dry_run:
+                _log_table_size(store)
     except WindowFailed as exc:
         return _exit_code_for_failure(exc, stats, args.dry_run)
     except NeoError as exc:
-        logger.error("%s", exc)
-        return exc.exit_code
+        code, label = outcome(exc)
+        logger.error("%s: %s", label, exc)
+        return code
     except KeyboardInterrupt:
         logger.warning(
             "Interrupted after %d of %d windows; completed windows were committed", stats.windows_done, stats.windows_total
         )
         return ExitCode.INTERRUPTED
     # Anything else is a bug: let it crash with a full traceback.
-
-    logger.info(
-        "Done: %d fetched, %d unique, %d inserted, %d updated, %d unchanged, %d invalid, %d missing days",
-        stats.fetched, stats.unique, stats.inserted, stats.updated, stats.unchanged, stats.invalid,
-        stats.missing_dates,
-    )
     return ExitCode.OK
 
 

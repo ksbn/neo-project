@@ -1,17 +1,23 @@
 """Application service: fetch, validate and store asteroids window by window.
 
-Knows nothing about HTTP, SQL, pydantic, ``.env`` or exit codes. Its
-collaborators are injected (see ``ports.py``), and every expected failure it
-sees is a :class:`errors.NeoError`.
+Imports only ``domain``, ``errors`` and ``ports``: nothing about HTTP, SQL,
+pydantic, ``.env`` or exit codes. Collaborators are composed in:
+
+* a :class:`ports.FeedSource` and an :class:`ports.AsteroidStore`
+  (:class:`DryRunStore` for ``--dry-run``), and
+* any number of :class:`RunObserver`s, which is how logging (:class:`LogObserver`)
+  and, later, run recording plug in without changing the service.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, replace
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, field
 from datetime import date, timedelta
+from typing import Protocol
 
-from client import date_chunks
+from domain import FeedBatch, InvalidObject, Observation, UpsertResult, date_windows, latest
 from errors import NeoError
 from ports import AsteroidStore, FeedSource
 
@@ -19,22 +25,24 @@ logger = logging.getLogger("pipeline")
 
 
 @dataclass(frozen=True)
-class WindowResult:
+class WindowReport:
     """What happened in one window."""
 
-    fetched: int = 0
-    invalid: int = 0
-    unique: int = 0
-    inserted: int = 0
-    updated: int = 0
-    unchanged: int = 0
-    missing_dates: int = 0
+    start: date
+    end: date
+    fetched: int
+    unique: int
+    invalid: list[InvalidObject] = field(default_factory=list)
+    missing_dates: list[date] = field(default_factory=list)
+    upsert: UpsertResult = field(default_factory=UpsertResult)
 
 
 @dataclass
 class PipelineStats:
-    """Running totals across all fetched windows."""
+    """Running totals across all windows of one run."""
 
+    start: date | None = None
+    end: date | None = None
     windows_total: int = 0
     windows_done: int = 0
     fetched: int = 0
@@ -45,40 +53,54 @@ class PipelineStats:
     unchanged: int = 0
     missing_dates: int = 0
 
-    def add(self, window: WindowResult) -> None:
+    def add(self, window: WindowReport) -> None:
         self.windows_done += 1
         self.fetched += window.fetched
-        self.invalid += window.invalid
+        self.invalid += len(window.invalid)
         self.unique += window.unique
-        self.inserted += window.inserted
-        self.updated += window.updated
-        self.unchanged += window.unchanged
-        self.missing_dates += window.missing_dates
+        self.inserted += window.upsert.inserted
+        self.updated += window.upsert.updated
+        self.unchanged += window.upsert.unchanged
+        self.missing_dates += len(window.missing_dates)
 
 
 class WindowFailed(Exception):
-    """A single 7-day window failed; earlier windows may already be committed.
-
-    Always raised ``from`` the underlying :class:`NeoError`, available as :attr:`cause`.
-    """
+    """A single window failed; earlier windows may already be committed."""
 
     def __init__(self, window_start: date, window_end: date, cause: NeoError) -> None:
         super().__init__(f"window {window_start}..{window_end} failed: {cause}")
         self.window_start = window_start
         self.window_end = window_end
+        self.cause = cause
 
-    @property
-    def cause(self) -> NeoError:
-        assert isinstance(self.__cause__, NeoError)
-        return self.__cause__
+
+class RunObserver(Protocol):
+    """Gets told what a run does. Observers must not raise."""
+
+    def run_started(self, stats: PipelineStats) -> None: ...
+
+    def window_done(self, report: WindowReport) -> None: ...
+
+    def run_finished(self, stats: PipelineStats, error: NeoError | None) -> None: ...
+
+
+class DryRunStore:
+    """An :class:`ports.AsteroidStore` that writes nothing (Null Object for ``--dry-run``)."""
+
+    def save(self, observations: Sequence[Observation]) -> UpsertResult:
+        return UpsertResult(unchanged=len(latest(observations)))
+
+    def count(self) -> int:
+        return 0
 
 
 class IngestService:
-    """Runs the pipeline over any date range. ``store=None`` means dry run."""
+    """Runs the pipeline over any date range."""
 
-    def __init__(self, feed: FeedSource, store: AsteroidStore | None) -> None:
+    def __init__(self, feed: FeedSource, store: AsteroidStore, observers: Iterable[RunObserver] = ()) -> None:
         self._feed = feed
         self._store = store
+        self._observers = tuple(observers)
 
     def run(self, start_date: date, end_date: date, stats: PipelineStats | None = None) -> PipelineStats:
         """Fetch, validate and store the inclusive range ``start_date``..``end_date``.
@@ -90,63 +112,86 @@ class IngestService:
             WindowFailed: A window failed with a NeoError; earlier windows stay committed.
         """
         stats = stats if stats is not None else PipelineStats()
-        windows = list(date_chunks(start_date, end_date))
-        stats.windows_total = len(windows)
-        logger.info(
-            "Starting pipeline for %s to %s (%d window%s)%s",
-            start_date, end_date, len(windows), "" if len(windows) == 1 else "s",
-            " (dry run)" if self._store is None else "",
-        )
+        windows = list(date_windows(start_date, end_date, self._feed.max_window_days))
+        stats.start, stats.end, stats.windows_total = start_date, end_date, len(windows)
+        for observer in self._observers:
+            observer.run_started(stats)
 
         for window_start, window_end in windows:
             try:
-                result = self._process_window(window_start, window_end)
+                report = self._process_window(window_start, window_end)
             except NeoError as exc:
+                self._finished(stats, exc)
                 raise WindowFailed(window_start, window_end, exc) from exc
-            stats.add(result)
+            stats.add(report)
+            for observer in self._observers:
+                observer.window_done(report)
 
-        if self._store is not None:
-            logger.info("Table now holds %d asteroids", self._store.count())
+        self._finished(stats, None)
         return stats
 
-    def _process_window(self, window_start: date, window_end: date) -> WindowResult:
-        """Fetch, validate and (unless dry run) upsert one window."""
-        result = self._feed.fetch_records(window_start, window_end)
+    def _process_window(self, window_start: date, window_end: date) -> WindowReport:
+        batch: FeedBatch = self._feed.fetch_records(window_start, window_end)
+        upsert = self._store.save(batch.observations)
+        return WindowReport(
+            start=window_start,
+            end=window_end,
+            fetched=batch.element_count,
+            unique=batch.unique_asteroids,
+            invalid=batch.invalid,
+            missing_dates=_missing_dates(window_start, window_end, batch.feed_dates),
+            upsert=upsert,
+        )
 
-        for bad in result.invalid:
-            logger.warning(
-                "Skipped invalid asteroid %s on %s: %s",
-                bad.neo_reference_id or "<unknown id>", bad.feed_date, bad.error,
+    def _finished(self, stats: PipelineStats, error: NeoError | None) -> None:
+        for observer in self._observers:
+            observer.run_finished(stats, error)
+
+
+class LogObserver:
+    """Logs progress and data-quality warnings (the pipeline's console output)."""
+
+    def __init__(self, log: logging.Logger = logger, *, dry_run: bool = False) -> None:
+        self._log = log
+        self._dry_run = dry_run
+
+    def run_started(self, stats: PipelineStats) -> None:
+        self._log.info(
+            "Starting pipeline for %s to %s (%d window%s)%s",
+            stats.start, stats.end, stats.windows_total, "" if stats.windows_total == 1 else "s",
+            " (dry run)" if self._dry_run else "",
+        )
+
+    def window_done(self, report: WindowReport) -> None:
+        for bad in report.invalid:
+            self._log.warning(
+                "Skipped invalid asteroid %s on %s: %s", bad.neo_reference_id or "<unknown id>", bad.feed_date, bad.error
             )
-
-        missing = _missing_dates(window_start, window_end, result.feed_dates)
-        if missing:
-            logger.warning(
+        if report.missing_dates:
+            self._log.warning(
                 "NeoWs returned no entry for %s; data for those days may be incomplete",
-                ", ".join(d.isoformat() for d in missing),
+                ", ".join(d.isoformat() for d in report.missing_dates),
             )
-
-        window = WindowResult(
-            fetched=result.element_count,
-            invalid=len(result.invalid),
-            unique=len(result.records),
-            missing_dates=len(missing),
-        )
-
-        if self._store is None:
-            logger.info(
+        if self._dry_run:
+            self._log.info(
                 "%s..%s: %d objects, %d valid unique asteroids (not written: dry run)",
-                window_start, window_end, result.element_count, len(result.records),
+                report.start, report.end, report.fetched, report.unique,
             )
-            return window
+        else:
+            self._log.info(
+                "%s..%s: %d objects -> %d inserted, %d updated, %d unchanged, %d invalid",
+                report.start, report.end, report.fetched,
+                report.upsert.inserted, report.upsert.updated, report.upsert.unchanged, len(report.invalid),
+            )
 
-        upsert = self._store.upsert_many(result.records)
-        logger.info(
-            "%s..%s: %d objects -> %d inserted, %d updated, %d unchanged, %d invalid",
-            window_start, window_end, result.element_count,
-            upsert.inserted, upsert.updated, upsert.unchanged, len(result.invalid),
+    def run_finished(self, stats: PipelineStats, error: NeoError | None) -> None:
+        if error is not None:
+            return  # the entry point logs failures with their mapped label
+        self._log.info(
+            "Done: %d fetched, %d unique, %d inserted, %d updated, %d unchanged, %d invalid, %d missing days",
+            stats.fetched, stats.unique, stats.inserted, stats.updated, stats.unchanged, stats.invalid,
+            stats.missing_dates,
         )
-        return replace(window, inserted=upsert.inserted, updated=upsert.updated, unchanged=upsert.unchanged)
 
 
 def _missing_dates(start: date, end: date, present: frozenset[date]) -> list[date]:

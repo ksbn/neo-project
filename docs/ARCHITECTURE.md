@@ -53,11 +53,11 @@ flowchart TD
     B --> C["Connect to the database first<br/>(so NASA calls aren't wasted)"]
     C --> D{"Another window?"}
     D -->|yes| E["client.py<br/>GET /feed, with retries"]
-    E --> F["models.py<br/>check each asteroid,<br/>skip bad ones, remove duplicates"]
-    F --> G["database.py<br/>save in 1 transaction<br/>(only new or changed rows)"]
+    E --> F["models.py<br/>check each asteroid,<br/>skip bad ones"]
+    F --> G["database.py<br/>keep the newest approach per asteroid,<br/>save in 1 transaction<br/>(only new or changed rows)"]
     G --> D
     D -->|no| H["Print summary, exit 0"]
-    E -.->|"NASA failed"| X["Stop: exit 3, or 1 if the key was rejected,<br/>or 7 if the format changed<br/>(5 if earlier windows were saved)"]
+    E -.->|"NASA failed"| X["Stop: exit 3, or 1 if the key was rejected,<br/>or 7 if the request or format was rejected<br/>(5 if earlier windows were saved)"]
     G -.->|"database failed"| Y["Stop: exit 4<br/>(or 5 if earlier windows were saved)"]
 ```
 
@@ -72,7 +72,7 @@ Each window is saved in its own transaction, so a run that stops halfway keeps t
 | 4 | Database error |
 | 5 | Partial run: re-run the same dates to finish |
 | 6 | Schema step failed, or migrations are pending (`run_pipeline.sh` / `migrate.sh` only) |
-| 7 | NASA's response format changed |
+| 7 | NASA rejected the request, or its response format changed |
 | 130 | Interrupted (Ctrl+C) |
 
 ---
@@ -82,17 +82,19 @@ Each window is saved in its own transaction, so a run that stops halfway keeps t
 ```mermaid
 flowchart TD
     subgraph Entry["Entry points"]
-        pipeline["pipeline.py<br/>CLI, wiring, exit codes"]
-        app["app.py<br/>Streamlit rendering"]
+        pipeline["pipeline.py<br/>CLI, wiring, CLI_OUTCOMES"]
+        app["app.py<br/>wiring, breakers, rendering"]
+        ui["ui_messages.py<br/>UI_MESSAGES"]
     end
     subgraph Services["Application services"]
-        ingest["ingest.py<br/>IngestService"]
-        dash["dashboard_data.py<br/>FallbackReader"]
+        ingest["ingest.py<br/>IngestService, LogObserver"]
+        dash["dashboard_data.py<br/>views, FallbackReader"]
+        res["resilience.py<br/>CircuitBreaker"]
     end
     subgraph Core["Domain"]
-        ports["ports.py<br/>FeedSource, AsteroidStore"]
-        domain["domain.py<br/>AsteroidRecord"]
-        errors["errors.py<br/>NeoError, ExitCode"]
+        ports["ports.py<br/>FeedSource, AsteroidStore, AsteroidReader"]
+        domain["domain.py<br/>Asteroid, CloseApproach, Observation, latest"]
+        errors["errors.py<br/>NeoError tree"]
     end
     subgraph Adapters["Adapters"]
         client["client.py<br/>talks to NASA"]
@@ -105,11 +107,15 @@ flowchart TD
     pipeline -->|"builds"| client
     pipeline -->|"builds"| database
     app --> dash
+    app --> res
+    app --> ui
     app --> config
+    app -->|"builds"| client
+    app -->|"builds"| database
     ingest --> ports
-    ingest --> errors
-    dash --> client
-    dash --> database
+    dash --> ports
+    ports --> domain
+    ingest --> domain
     client -. "satisfies" .-> ports
     database -. "satisfies" .-> ports
     client --> models
@@ -123,9 +129,9 @@ flowchart TD
     database -.->|"expects the table defined in"| mig
 ```
 
-Solid arrows are Python imports. Dotted arrows to `ports.py` mean "has the methods the protocol asks for"; nothing inherits. Dotted arrows to migrations are assumptions kept in sync by hand. A test fails if the column size limits in `models.py` drift from the migrations.
+Solid arrows are Python imports. Services and ports import only the domain; the entry points are the only modules that pick concrete adapters. Dotted arrows to `ports.py` mean "has the methods the protocol asks for"; nothing inherits, and pyright checks it in CI. Dotted arrows to migrations are assumptions kept in sync by hand. Tests fail if the column size limits in `models.py` or the column list in `database.py` drift from the migrations.
 
-Errors: each adapter turns its library's exceptions into one `NeoError` subclass (`UpstreamUnavailable`, `UpstreamRateLimited`, `UpstreamAuthError`, `FeedContractError`, `StorageError`, `ConfigError`), and each subclass carries its exit code. `pipeline.py` and the dashboard catch `NeoError` only.
+Errors: each adapter turns its library's exceptions into one `NeoError` subclass (`UpstreamUnavailable`, `UpstreamRateLimited`, `UpstreamAuthError`, `UpstreamRequestError`, `FeedContractError`, `StorageError`, `ConfigError`). The classes only classify. `pipeline.CLI_OUTCOMES` maps them to exit codes and `ui_messages.UI_MESSAGES` to dashboard text, both by the most specific class, so a new subclass can never crash a handler.
 
 ---
 
@@ -137,7 +143,7 @@ flowchart LR
     PR --> CI{"CI on fresh Postgres"}
     CI -->|"1"| S["Apply main's migrations,<br/>then this branch's with --strict"]
     CI -->|"2"| RB["Roll everything back,<br/>apply again"]
-    CI -->|"3"| T["Run pytest"]
+    CI -->|"3"| T["pyright, then pytest"]
     S & RB & T --> MG["Merge"]
     MG --> RUN["Next daily run or<br/>run_pipeline.sh"]
     RUN --> UP["dbmate up<br/>applies pending files in timestamp order"]

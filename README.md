@@ -89,7 +89,7 @@ The schema step and the data step are separate programs, and `run_pipeline.sh` i
 | 4 | Database error (from `migrate.sh`: Docker not running or PostgreSQL not healthy) |
 | 5 | Partial run: some 7-day windows were saved before a later one failed; re-run the same range to finish |
 | 6 | Schema step failed: a migration errored, or (`MIGRATIONS=check`) migrations are pending. From `run_pipeline.sh` / `migrate.sh` only |
-| 7 | NASA answered in an unexpected format (API schema changed); retrying won't help, `models.py` needs updating |
+| 7 | NASA rejected the request (HTTP 4xx other than 401/403/429) or answered in an unexpected format (API schema changed); retrying won't help, the code needs updating |
 | 130 | Interrupted (Ctrl+C) |
 
 ### 5. Open the Dashboard (optional)
@@ -98,7 +98,9 @@ The schema step and the data step are separate programs, and `run_pipeline.sh` i
 streamlit run app.py
 ```
 
-It reads the newest 5,000 asteroids from PostgreSQL, and falls back to the live NASA API (last 3 days, one quick retry, so the page never waits minutes on a rate limit) if the database is unavailable or empty. Failures are not cached, so the page recovers as soon as the database is back; the Diagnostics panel in the sidebar says why a source was skipped.
+It shows totals over the whole `asteroids` table (computed in SQL) and lists the newest 5,000 rows. If the database is unavailable or empty it falls back to the live NASA API (last 3 days, one quick retry, so the page never waits minutes on a rate limit).
+
+Failures are not cached, so the page recovers as soon as a source is back, but a source that just failed is skipped for a cooldown (database 30 s, NASA 120 s) so that clicking around a degraded page stays instant. **Refresh data** clears the caches and the cooldowns. The Diagnostics panel in the sidebar says why a source was skipped.
 
 ---
 
@@ -107,18 +109,22 @@ It reads the newest 5,000 asteroids from PostgreSQL, and falls back to the live 
 | Module | Layer | Job |
 |---|---|---|
 | `pipeline.py` | Entry point | CLI arguments, builds the dependencies, maps errors to exit codes |
-| `app.py` | Entry point | Streamlit rendering only |
-| `ingest.py` | Application service | `IngestService`: fetch, validate and store window by window |
-| `dashboard_data.py` | Application service | Dashboard reads: `FallbackReader` over PostgreSQL, then NASA |
-| `ports.py` | Interfaces | `FeedSource`, `AsteroidStore` protocols the services depend on |
-| `domain.py` | Domain | `AsteroidRecord`, the row every layer agrees on |
-| `errors.py` | Domain | `ExitCode` and the `NeoError` hierarchy |
+| `app.py` | Entry point | Dashboard wiring (sources, caches, circuit breakers) and Streamlit rendering |
+| `ui_messages.py` | Entry point | How the dashboard words each error (`UI_MESSAGES`) |
+| `ingest.py` | Application service | `IngestService` (fetch, validate, store window by window), `RunObserver`s such as `LogObserver`, `DryRunStore` |
+| `dashboard_data.py` | Application service | Builds the dashboard's `AsteroidView` from a store or a feed; `FallbackReader` |
+| `resilience.py` | Application service | `CircuitBreaker` for interactive callers |
+| `ports.py` | Interfaces | `FeedSource`, `AsteroidStore`, `AsteroidReader` protocols; they mention only domain types |
+| `domain.py` | Domain | `Asteroid`, `CloseApproach`, `Observation`, the `latest()` rule, `FeedBatch`, `date_windows`, read models |
+| `errors.py` | Domain | The `NeoError` hierarchy (classification only) |
 | `config.py` | Infrastructure | `Settings`: the only code that reads `.env` / the environment |
 | `client.py` | Adapter | NASA HTTP client, retry profiles, HTTP errors to typed errors |
-| `models.py` | Adapter | NASA JSON shapes, validation, mapping to `AsteroidRecord` |
-| `database.py` | Adapter | PostgreSQL connection and `AsteroidRepository` |
+| `models.py` | Adapter | NASA JSON shapes, validation, mapping to `Observation` |
+| `database.py` | Adapter | PostgreSQL connection and `AsteroidRepository` (write: `save`; read: `overview`, `list_recent`) |
 
-Adapters translate library exceptions (`requests`, `pydantic`, `psycopg`) into `NeoError` subclasses. Entry points catch only `NeoError`; anything else is a bug and crashes with a traceback instead of being reported as an outage.
+Adapters translate library exceptions (`requests`, `pydantic`, `psycopg`) into `NeoError` subclasses. Entry points catch only `NeoError`; anything else is a bug and crashes with a traceback instead of being reported as an outage. How an error is presented is decided by each entry point: `pipeline.CLI_OUTCOMES` (exit code and log label) and `ui_messages.UI_MESSAGES` (dashboard text).
+
+Which close approach is kept is decided in one place, `domain.latest()`. The parser keeps every approach it sees, and the repository stores the newest per asteroid, so keeping the full history later only needs a new table and a second write.
 
 ---
 
@@ -126,15 +132,19 @@ Adapters translate library exceptions (`requests`, `pydantic`, `psycopg`) into `
 
 ```bash
 pip install -r requirements-dev.txt
+pyright     # type-check; enforces that adapters and test fakes match ports.py
 pytest
 ```
 
-* `tests/test_models.py`: Pydantic validation of NeoWs payloads.
+* `tests/test_domain.py`: the `latest()` rule, date windows, strict entities.
+* `tests/test_models.py`: Pydantic validation of NeoWs payloads and mapping to observations.
 * `tests/test_client.py`: the HTTP client, with NASA simulated by `responses` (no real API calls): errors, retries, timeouts, rate limits, retry profiles.
 * `tests/test_config.py`: settings validation.
-* `tests/test_database.py`: the idempotent upsert and the dashboard query against PostgreSQL.
-* `tests/test_ingest.py`: `IngestService` with in-memory fakes.
-* `tests/test_dashboard_data.py`: the dashboard's fallback and normalization, without Streamlit.
+* `tests/test_database.py`: the idempotent upsert, totals and the dashboard query against PostgreSQL.
+* `tests/test_ingest.py`: `IngestService` and its observers with in-memory fakes.
+* `tests/test_dashboard_data.py`: the dashboard's views and fallback, without Streamlit.
+* `tests/test_resilience.py`: the circuit breaker and the dashboard's error wording.
+* `tests/test_ports.py`: protocol conformance (checked by pyright).
 * `tests/test_pipeline.py`: argument parsing and exit codes end to end.
 
 Database tests use the PostgreSQL from `.env` but never touch your data: they build a throwaway schema from `db/migrations/`, roll back every test, and drop the schema afterwards. If PostgreSQL isn't running, they are skipped.
@@ -165,4 +175,4 @@ Each file has a `-- migrate:up` section and a `-- migrate:down` section. Rules:
 
 1. applies the base branch's migrations, then the PR's with `--strict`, which fails if the PR adds a migration that sorts before one already on the base branch;
 2. rolls every migration back and applies them again, which checks that each `-- migrate:down` really undoes its `up`;
-3. runs the test suite against the migrated database.
+3. type-checks the code with pyright and runs the test suite against the migrated database.
