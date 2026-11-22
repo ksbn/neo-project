@@ -15,6 +15,10 @@ is what the dashboard needs to know about recent runs.
 
 Read side (dashboard): :class:`AsteroidSummary`, :class:`ApproachSummary`,
 :class:`Overview` and :class:`AsteroidView`.
+
+Control Room: :class:`AnomalyAlert` and :class:`Severity` (rules in
+``domain/anomaly_rules.py``); :class:`OrbitalElements`, :class:`Vec3` and
+:class:`Trajectory3D` (math in ``domain/orbital_math.py``).
 """
 
 from __future__ import annotations
@@ -23,7 +27,8 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from enum import StrEnum
+from enum import IntEnum, StrEnum
+from typing import NamedTuple, Self
 
 from pydantic import BaseModel, ConfigDict
 
@@ -247,3 +252,100 @@ class AsteroidView:
     @property
     def is_empty(self) -> bool:
         return self.overview.total == 0
+
+
+# --------------------------------------------------------------------------- #
+# Control Room: anomaly alerts
+# --------------------------------------------------------------------------- #
+
+
+class Severity(IntEnum):
+    """Ordered: a higher value is more urgent."""
+
+    INFO = 1
+    WATCH = 2
+    WARNING = 3
+    CRITICAL = 4
+
+
+@dataclass(frozen=True)
+class AnomalyAlert:
+    """One rule firing for one close approach (or for the asteroid, if it has none)."""
+
+    rule: str
+    severity: Severity
+    neo_reference_id: str
+    name: str
+    close_approach_date: date | None
+    message: str
+    value: float | None = None  # the measured quantity, in the rule's unit
+    threshold: float | None = None
+
+    @classmethod
+    def for_observation(
+        cls,
+        obs: Observation,
+        rule: str,
+        severity: Severity,
+        message: str,
+        value: float | None = None,
+        threshold: float | None = None,
+    ) -> Self:
+        return cls(
+            rule=rule, severity=severity, neo_reference_id=obs.neo_reference_id, name=obs.asteroid.name,
+            close_approach_date=obs.approach_date, message=message, value=value, threshold=threshold,
+        )
+
+
+# --------------------------------------------------------------------------- #
+# 3D visualizer: orbits and trajectories
+# --------------------------------------------------------------------------- #
+
+
+class Vec3(NamedTuple):
+    """A point or direction in the J2000 ecliptic frame (x towards the March equinox, z to the ecliptic pole)."""
+
+    x: float
+    y: float
+    z: float
+
+
+@dataclass(frozen=True)
+class OrbitalElements:
+    """Osculating Keplerian elements of a heliocentric elliptical orbit at ``epoch_jd``.
+
+    Angles are in degrees, referred to the J2000 ecliptic and equinox (as NeoWs
+    ``/neo/{id}`` ``orbital_data`` reports them).
+    """
+
+    semi_major_axis_au: float
+    eccentricity: float
+    inclination_deg: float
+    ascending_node_deg: float
+    perihelion_argument_deg: float
+    mean_anomaly_deg: float
+    epoch_jd: float
+
+    def __post_init__(self) -> None:
+        if not self.semi_major_axis_au > 0:
+            raise ValueError(f"semi_major_axis_au must be positive, got {self.semi_major_axis_au}")
+        if not 0 <= self.eccentricity < 1:
+            raise ValueError(f"eccentricity must be in [0, 1) for an elliptical orbit, got {self.eccentricity}")
+
+
+@dataclass(frozen=True)
+class Trajectory3D:
+    """An asteroid's path around a close approach, centred on Earth, in lunar distances.
+
+    Direction comes from the orbit model; the distance at closest approach is
+    NASA's reported miss distance. ``model_miss_ld`` is what the two-body model
+    alone predicted, which shows how approximate the drawn path is.
+    """
+
+    times_jd: list[float]
+    points_ld: list[Vec3]
+    closest_index: int  # nearest sample to Earth
+    closest_time_jd: float  # exact time of closest approach in the model
+    closest_point_ld: Vec3  # exact closest point, at NASA's miss distance
+    miss_distance_ld: float
+    model_miss_ld: float
