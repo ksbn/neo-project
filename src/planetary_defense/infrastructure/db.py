@@ -35,6 +35,7 @@ def connect(
             dbname=config.dbname,
             user=config.user,
             password=config.password,
+            sslmode=config.sslmode,
             connect_timeout=connect_timeout,
             application_name=application_name,
             **kwargs,

@@ -2,9 +2,13 @@
 .env
 .env.*
 !.env.example
+!.env.cloud.example
 venv/
 .venv/
 __pycache__/
 *.pyc
 *.egg-info/
 build/
+
+# Streamlit Cloud secrets (the template .streamlit/secrets.toml.example is committed)
+.streamlit/secrets.toml

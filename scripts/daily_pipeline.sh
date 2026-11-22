@@ -43,4 +43,16 @@ fi
 start_date="$(date -v-2d +%F)"
 end_date="$(date +%F)"
 log "Running pipeline for $start_date to $end_date"
-exec "$PROJECT_DIR/scripts/run_pipeline.sh" --start "$start_date" --end "$end_date"
+status=0
+"$PROJECT_DIR/scripts/run_pipeline.sh" --start "$start_date" --end "$end_date" || status=$?
+
+# TEMPORARY (Streamlit Cloud demo): also refresh the hosted database when .env.cloud exists.
+# Best effort: the local run decides the exit code. Delete this block with the deployment.
+if [ -f "$PROJECT_DIR/.env.cloud" ]; then
+    log "Refreshing the hosted database (Streamlit Cloud demo)"
+    if ! (set -a; source "$PROJECT_DIR/.env.cloud"; set +a
+          MIGRATIONS=skip "$PROJECT_DIR/scripts/run_pipeline.sh" --start "$start_date" --end "$end_date"); then
+        log "Hosted database refresh failed; the local data is unaffected"
+    fi
+fi
+exit "$status"

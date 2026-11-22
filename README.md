@@ -162,6 +162,28 @@ a **3D Space Viewport** (the Control Room's three.js scene, fed by `/trajectory`
 key ("Test: send twice" demonstrates the replay); a compare tray; empty and error states with Retry; and
 keyboard shortcuts (`/` `j` `k` `Enter` `w` `x` `[` `]` `1`–`6` `0` `Esc` `?`).
 
+### Temporary Streamlit Cloud deployment
+
+> **Temporary.** The Streamlit Control Room runs on Streamlit Community Cloud until it and the REST
+> dashboard are merged into one UI; then the deployment and everything listed under *Removal* go.
+
+It reads a hosted PostgreSQL (for example a free [Neon](https://neon.tech) project) and uses NASA's
+`DEMO_KEY`, so public visitors never use your personal key.
+
+1. **Database.** Create the hosted database, copy `.env.cloud.example` to `.env.cloud` (git-ignored),
+   fill it in, then `scripts/cloud_db.sh migrate` and `scripts/cloud_db.sh copy` (the current local data;
+   `copy --replace` to refresh it later, `status` for row counts). While `.env.cloud` exists, the daily
+   job also refreshes the hosted database after the local run (best effort; the local run decides the exit code).
+2. **App.** On [share.streamlit.io](https://share.streamlit.io): *Create app* → this repository, the branch,
+   main file `app.py`; *Advanced settings* → Python 3.14 and the secrets from `.streamlit/secrets.toml.example`
+   (`NASA_API_KEY = "DEMO_KEY"`, the `DB_*` values, `DB_SSLMODE = "require"`). `requirements.txt` installs
+   this package.
+
+**Removal:** delete the app on share.streamlit.io and the hosted database; delete `requirements.txt`,
+`.streamlit/secrets.toml.example`, `.env.cloud.example`, `.env.cloud`, `scripts/cloud_db.sh`, the
+`TEMPORARY` block in `scripts/daily_pipeline.sh`, the two `.gitignore` lines for them, and this section.
+(`DB_SSLMODE` stays: it's useful for any hosted database.)
+
 ## Code Layout
 
 The code is one package, `src/planetary_defense/`, in four layers. Each layer imports only from the layers inside it: `domain` imports nothing from the project (and no Streamlit, HTTP or SQL libraries), `application` imports only `domain`, and the entry points (`cli.py`, `ui/app.py`) are the only modules that pick concrete adapters.

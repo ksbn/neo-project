@@ -10,12 +10,14 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from datetime import timedelta
-from typing import Self
+from typing import Final, Self
 
 from dotenv import load_dotenv
 
 from planetary_defense.domain.anomaly_rules import AlertThresholds
 from planetary_defense.domain.errors import ConfigError
+
+SSL_MODES: Final = ("disable", "allow", "prefer", "require", "verify-ca", "verify-full")
 
 
 @dataclass(frozen=True)
@@ -27,6 +29,7 @@ class DbConfig:
     dbname: str
     user: str
     password: str = field(repr=False)  # keep the password out of logs/tracebacks
+    sslmode: str = "prefer"  # hosted databases (e.g. Neon) need "require"
 
     @classmethod
     def from_mapping(cls, env: Mapping[str, str]) -> Self:
@@ -46,12 +49,17 @@ class DbConfig:
         except ValueError:
             raise ConfigError(f"DB_PORT must be an integer, got {port_raw!r}") from None
 
+        sslmode = (env.get("DB_SSLMODE") or "prefer").strip()
+        if sslmode not in SSL_MODES:
+            raise ConfigError(f"DB_SSLMODE must be one of {', '.join(SSL_MODES)}, got {sslmode!r}")
+
         return cls(
             host=env.get("DB_HOST") or "localhost",
             port=port,
             dbname=env["DB_NAME"],
             user=env["DB_USER"],
             password=env["DB_PASSWORD"],
+            sslmode=sslmode,
         )
 
 

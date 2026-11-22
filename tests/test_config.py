@@ -69,3 +69,11 @@ def test_orbit_cache_max_age():
     assert Settings({"ORBIT_CACHE_MAX_AGE_DAYS": "7"}).orbit_cache_max_age() == timedelta(days=7)
     with pytest.raises(ConfigError, match="ORBIT_CACHE_MAX_AGE_DAYS"):
         Settings({"ORBIT_CACHE_MAX_AGE_DAYS": "-1"}).orbit_cache_max_age()
+
+
+def test_ssl_mode_defaults_to_prefer_and_is_validated():
+    base = {"DB_NAME": "neo", "DB_USER": "u", "DB_PASSWORD": "p"}
+    assert DbConfig.from_mapping(base).sslmode == "prefer"
+    assert DbConfig.from_mapping({**base, "DB_SSLMODE": "require"}).sslmode == "require"  # hosted databases
+    with pytest.raises(ConfigError, match="DB_SSLMODE"):
+        DbConfig.from_mapping({**base, "DB_SSLMODE": "yes"})
