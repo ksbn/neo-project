@@ -2,8 +2,11 @@
 
 The client wraps a ``requests.Session`` configured with automatic retries
 (exponential backoff on connection errors, timeouts, HTTP 429 and 5xx), and
-translates every failure into a single :class:`NasaApiError` so callers only
-need to handle one exception type.
+translates every failure into an :class:`errors.UpstreamError` subclass that
+says whether retrying can help (auth vs rate limit vs outage vs format change).
+
+Two retry profiles exist because the callers differ: the batch pipeline can
+wait out a ``Retry-After``; the dashboard has a person waiting on the page.
 
 The API key is sent in the ``X-Api-Key`` header rather than the query string,
 so it never appears in URLs, exception messages or urllib3 debug logs.
@@ -12,38 +15,55 @@ so it never appears in URLs, exception messages or urllib3 debug logs.
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import Iterator
+from dataclasses import dataclass
 from datetime import date, timedelta
 from types import TracebackType
 from typing import Any, Final, Self
 from urllib.parse import urlsplit
 
 import requests
-from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
 from urllib3.exceptions import MaxRetryError, NameResolutionError, NewConnectionError
 from urllib3.exceptions import TimeoutError as Urllib3TimeoutError
 from urllib3.util.retry import Retry
+
+from errors import (
+    FeedContractError,
+    UpstreamAuthError,
+    UpstreamError,
+    UpstreamRateLimited,
+    UpstreamUnavailable,
+)
+from models import ParseResult, parse_feed
 
 logger = logging.getLogger(__name__)
 
 BASE_URL: Final = "https://api.nasa.gov/neo/rest/v1"
 # NeoWs rejects feed requests spanning more than 7 days; 7 inclusive days is safe.
 MAX_FEED_DAYS: Final = 7
-# (connect timeout, read timeout) in seconds.
-DEFAULT_TIMEOUT: Final = (5.0, 30.0)
 RETRY_STATUS_CODES: Final = frozenset({429, 500, 502, 503, 504})
 # Upper bound on a server-supplied Retry-After; urllib3's own default is 6 hours.
 MAX_RETRY_AFTER_SECONDS: Final = 60.0
 
 
-class NasaApiError(RuntimeError):
-    """The NeoWs API could not be reached or returned an unusable response."""
+# Backwards-compatible name: catches every NASA failure, whatever its category.
+NasaApiError = UpstreamError
 
-    def __init__(self, message: str, status_code: int | None = None) -> None:
-        super().__init__(message)
-        self.status_code = status_code
+
+@dataclass(frozen=True)
+class RetryProfile:
+    """How patient a caller is with NASA."""
+
+    timeout: tuple[float, float]  # (connect, read) seconds per attempt
+    max_retries: int
+    respect_retry_after: bool
+
+
+# Unattended pipeline: wait out rate limits (capped at MAX_RETRY_AFTER_SECONDS).
+BATCH: Final = RetryProfile(timeout=(5.0, 30.0), max_retries=5, respect_retry_after=True)
+# Dashboard: one quick retry, never sleep on Retry-After. Worst case is about 2 x (3 + 8) s.
+INTERACTIVE: Final = RetryProfile(timeout=(3.0, 8.0), max_retries=1, respect_retry_after=False)
 
 
 def date_chunks(start_date: date, end_date: date, max_days: int = MAX_FEED_DAYS) -> Iterator[tuple[date, date]]:
@@ -76,7 +96,7 @@ class _CappedRetry(Retry):
         return min(super().parse_retry_after(retry_after), MAX_RETRY_AFTER_SECONDS)
 
 
-def _build_session(max_retries: int, backoff_factor: float) -> requests.Session:
+def _build_session(max_retries: int, backoff_factor: float, respect_retry_after: bool) -> requests.Session:
     """Create a session that retries idempotent GETs with exponential backoff."""
     retry = _CappedRetry(
         total=max_retries,
@@ -86,7 +106,7 @@ def _build_session(max_retries: int, backoff_factor: float) -> requests.Session:
         backoff_factor=backoff_factor,  # sleeps 0s, 2s, 4s, 8s, ... (x backoff_factor)
         status_forcelist=RETRY_STATUS_CODES,
         allowed_methods=frozenset({"GET"}),
-        respect_retry_after_header=True,
+        respect_retry_after_header=respect_retry_after,
         # Return the final failed response instead of raising, so we can
         # report the API's own error message.
         raise_on_status=False,
@@ -143,39 +163,39 @@ class NeoWsClient:
 
     Use as a context manager so the underlying HTTP session is closed::
 
-        with NeoWsClient() as client:
-            payload = client.get_feed(date(2024, 1, 1), date(2024, 1, 7))
+        with NeoWsClient(settings.nasa_api_key()) as client:
+            result = client.fetch_records(date(2024, 1, 1), date(2024, 1, 7))
     """
 
     def __init__(
         self,
-        api_key: str | None = None,
+        api_key: str,
         *,
         base_url: str = BASE_URL,
-        timeout: tuple[float, float] = DEFAULT_TIMEOUT,
-        max_retries: int = 5,
+        profile: RetryProfile = BATCH,
+        timeout: tuple[float, float] | None = None,
+        max_retries: int | None = None,
         backoff_factor: float = 1.0,
         session: requests.Session | None = None,
     ) -> None:
         """Create a client.
 
         Args:
-            api_key: NASA API key. Defaults to ``NASA_API_KEY`` from the environment / ``.env``.
+            api_key: NASA API key (see ``config.Settings.nasa_api_key``).
             base_url: NeoWs base URL (overridable for testing).
+            profile: Retry/timeout preset; ``timeout`` and ``max_retries`` override its values.
             timeout: ``(connect, read)`` timeouts in seconds for each attempt.
             max_retries: Maximum retry attempts for transient failures.
             backoff_factor: Multiplier for the exponential backoff between retries.
             session: Pre-configured session (mainly for tests); retries are not added to it.
         """
-        if api_key is None:
-            load_dotenv()
-            api_key = os.getenv("NASA_API_KEY")
         if not api_key:
-            raise ValueError("NASA_API_KEY is not set; add it to .env (see .env.example)")
+            raise ValueError("api_key must be a non-empty string")
 
         self._base_url = base_url.rstrip("/")
-        self._timeout = timeout
-        self._session = session or _build_session(max_retries, backoff_factor)
+        self._timeout = timeout or profile.timeout
+        retries = profile.max_retries if max_retries is None else max_retries
+        self._session = session or _build_session(retries, backoff_factor, profile.respect_retry_after)
         self._session.headers["X-Api-Key"] = api_key
 
     def __enter__(self) -> Self:
@@ -197,30 +217,29 @@ class NeoWsClient:
         """Fetch the raw NeoWs feed for an inclusive range of at most 7 days.
 
         Raises:
-            ValueError: If the range is inverted or longer than 7 days.
-            NasaApiError: On network failure, timeout, non-2xx status or invalid JSON.
+            ValueError: If the range is inverted or longer than 7 days (a caller bug).
+            UpstreamError: A subclass describing the failure; see ``errors.py``.
         """
         if end_date < start_date:
             raise ValueError(f"end_date ({end_date}) is before start_date ({start_date})")
         if (end_date - start_date).days >= MAX_FEED_DAYS:
-            raise ValueError(f"NeoWs feed range is limited to {MAX_FEED_DAYS} days; use iter_feed() for longer ranges")
+            raise ValueError(f"NeoWs feed range is limited to {MAX_FEED_DAYS} days; split it with date_chunks()")
 
         return self._get(
             "feed",
             params={"start_date": start_date.isoformat(), "end_date": end_date.isoformat()},
         )
 
-    def iter_feed(self, start_date: date, end_date: date) -> Iterator[tuple[date, date, dict[str, Any]]]:
-        """Fetch an arbitrarily long date range, one 7-day window at a time.
+    def fetch_records(self, start_date: date, end_date: date) -> ParseResult:
+        """Fetch and validate one window: NASA's raw JSON never leaves the adapter.
 
-        Yields:
-            ``(chunk_start, chunk_end, payload)`` for each window, in chronological order.
+        Raises:
+            UpstreamError: Transport/HTTP failure, or ``FeedContractError`` if the envelope is malformed.
         """
-        for chunk_start, chunk_end in date_chunks(start_date, end_date):
-            yield chunk_start, chunk_end, self.get_feed(chunk_start, chunk_end)
+        return parse_feed(self.get_feed(start_date, end_date))
 
     def _get(self, path: str, params: dict[str, str]) -> dict[str, Any]:
-        """GET ``path`` and return the decoded JSON object, raising NasaApiError on failure."""
+        """GET ``path`` and return the decoded JSON object, raising an UpstreamError subclass on failure."""
         url = f"{self._base_url}/{path.lstrip('/')}"
         logger.debug("GET %s params=%s", url, params)
 
@@ -228,37 +247,40 @@ class NeoWsClient:
             response = self._session.get(url, params=params, timeout=self._timeout)
         except requests.RequestException as exc:
             if _is_timeout(exc):
-                raise NasaApiError(
+                raise UpstreamUnavailable(
                     f"Timed out calling NeoWs /{path} after retries "
                     f"(connect {self._timeout[0]:g}s / read {self._timeout[1]:g}s per attempt)"
                 ) from exc
             if isinstance(_retry_reason(exc), NameResolutionError):
                 host = urlsplit(url).hostname
-                raise NasaApiError(
+                raise UpstreamUnavailable(
                     f"Could not resolve {host} after retries; is the internet connection up?"
                 ) from exc
-            raise NasaApiError(f"Network error calling NeoWs /{path}: {exc}") from exc
+            raise UpstreamUnavailable(f"Network error calling NeoWs /{path}: {exc}") from exc
 
         remaining = response.headers.get("X-RateLimit-Remaining")
         if remaining is not None:
             logger.debug("NASA API rate limit remaining: %s", remaining)
 
-        if response.status_code == 429:
-            raise NasaApiError(
+        status = response.status_code
+        if status == 429:
+            raise UpstreamRateLimited(
                 f"NeoWs /{path} rate limit exceeded (HTTP 429) after retries. DEMO_KEY allows only a few "
                 "requests per hour; set a personal NASA_API_KEY from https://api.nasa.gov in .env",
                 status_code=429,
             )
         if not response.ok:
-            raise NasaApiError(
-                f"NeoWs /{path} returned HTTP {response.status_code}: {_error_detail(response)}",
-                status_code=response.status_code,
-            )
+            message = f"NeoWs /{path} returned HTTP {status}: {_error_detail(response)}"
+            if status in (401, 403):
+                raise UpstreamAuthError(f"{message} (check NASA_API_KEY in .env)", status_code=status)
+            if status >= 500:
+                raise UpstreamUnavailable(message, status_code=status)
+            raise UpstreamError(message, status_code=status)
 
         try:
             payload = response.json()
         except ValueError as exc:
-            raise NasaApiError(f"NeoWs /{path} returned a non-JSON response") from exc
+            raise FeedContractError(f"NeoWs /{path} returned a non-JSON response") from exc
         if not isinstance(payload, dict):
-            raise NasaApiError(f"NeoWs /{path} returned JSON of type {type(payload).__name__}, expected an object")
+            raise FeedContractError(f"NeoWs /{path} returned JSON of type {type(payload).__name__}, expected an object")
         return payload

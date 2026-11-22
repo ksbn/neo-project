@@ -7,6 +7,8 @@ import pytest
 from pydantic import ValidationError
 
 from conftest import make_feed, make_neo
+from domain import AsteroidRecord
+from errors import FeedContractError
 from models import parse_feed
 
 
@@ -69,9 +71,17 @@ def test_empty_feed():
         {"element_count": -1, "near_earth_objects": {}},
     ],
 )
-def test_malformed_envelope_raises(payload):
-    with pytest.raises(ValidationError):
+def test_malformed_envelope_raises_contract_error(payload):
+    with pytest.raises(FeedContractError) as exc:
         parse_feed(payload)
+    assert isinstance(exc.value.__cause__, ValidationError)  # original kept for the traceback
+
+
+def test_record_rejects_unknown_fields():
+    """The domain record is strict, unlike the lenient NASA DTOs."""
+    (record,) = parse_feed(make_feed({"2026-11-10": [make_neo("1")]})).records
+    with pytest.raises(ValidationError, match="Extra inputs"):
+        AsteroidRecord(**record.model_dump(), typo_field=1)
 
 
 @pytest.mark.parametrize(

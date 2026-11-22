@@ -57,7 +57,7 @@ flowchart TD
     F --> G["database.py<br/>save in 1 transaction<br/>(only new or changed rows)"]
     G --> D
     D -->|no| H["Print summary, exit 0"]
-    E -.->|"NASA failed"| X["Stop: exit 3<br/>(or 5 if earlier windows were saved)"]
+    E -.->|"NASA failed"| X["Stop: exit 3, or 1 if the key was rejected,<br/>or 7 if the format changed<br/>(5 if earlier windows were saved)"]
     G -.->|"database failed"| Y["Stop: exit 4<br/>(or 5 if earlier windows were saved)"]
 ```
 
@@ -66,12 +66,13 @@ Each window is saved in its own transaction, so a run that stops halfway keeps t
 | Exit code | Meaning |
 |---|---|
 | 0 | Success |
-| 1 | Configuration error (for example, missing `.env` settings) |
+| 1 | Configuration error (missing `.env` settings, or NASA rejected the API key) |
 | 2 | Invalid arguments |
-| 3 | NASA API unavailable or returned unusable data |
+| 3 | NASA API unavailable or rate limited |
 | 4 | Database error |
 | 5 | Partial run: re-run the same dates to finish |
 | 6 | Schema step failed, or migrations are pending (`run_pipeline.sh` / `migrate.sh` only) |
+| 7 | NASA's response format changed |
 | 130 | Interrupted (Ctrl+C) |
 
 ---
@@ -80,18 +81,51 @@ Each window is saved in its own transaction, so a run that stops halfway keeps t
 
 ```mermaid
 flowchart TD
-    pipeline["pipeline.py<br/>command line + order of steps"] --> client["client.py<br/>talks to NASA"]
-    pipeline --> models["models.py<br/>checks the data"]
-    pipeline --> database["database.py<br/>talks to Postgres"]
-    database --> models
-    app["app.py<br/>dashboard"] --> client
-    app --> models
-    app --> database
+    subgraph Entry["Entry points"]
+        pipeline["pipeline.py<br/>CLI, wiring, exit codes"]
+        app["app.py<br/>Streamlit rendering"]
+    end
+    subgraph Services["Application services"]
+        ingest["ingest.py<br/>IngestService"]
+        dash["dashboard_data.py<br/>FallbackReader"]
+    end
+    subgraph Core["Domain"]
+        ports["ports.py<br/>FeedSource, AsteroidStore"]
+        domain["domain.py<br/>AsteroidRecord"]
+        errors["errors.py<br/>NeoError, ExitCode"]
+    end
+    subgraph Adapters["Adapters"]
+        client["client.py<br/>talks to NASA"]
+        models["models.py<br/>NASA JSON shapes"]
+        database["database.py<br/>talks to Postgres"]
+        config["config.py<br/>reads .env"]
+    end
+    pipeline --> ingest
+    pipeline --> config
+    pipeline -->|"builds"| client
+    pipeline -->|"builds"| database
+    app --> dash
+    app --> config
+    ingest --> ports
+    ingest --> errors
+    dash --> client
+    dash --> database
+    client -. "satisfies" .-> ports
+    database -. "satisfies" .-> ports
+    client --> models
+    models --> domain
+    database --> domain
+    client --> errors
+    models --> errors
+    database --> errors
+    config --> errors
     models -.->|"copies column size limits from"| mig["db/migrations/*.sql"]
     database -.->|"expects the table defined in"| mig
 ```
 
-Solid arrows are Python imports. Dotted arrows are assumptions kept in sync by hand. A test fails if the column size limits in `models.py` drift from the migrations.
+Solid arrows are Python imports. Dotted arrows to `ports.py` mean "has the methods the protocol asks for"; nothing inherits. Dotted arrows to migrations are assumptions kept in sync by hand. A test fails if the column size limits in `models.py` drift from the migrations.
+
+Errors: each adapter turns its library's exceptions into one `NeoError` subclass (`UpstreamUnavailable`, `UpstreamRateLimited`, `UpstreamAuthError`, `FeedContractError`, `StorageError`, `ConfigError`), and each subclass carries its exit code. `pipeline.py` and the dashboard catch `NeoError` only.
 
 ---
 
