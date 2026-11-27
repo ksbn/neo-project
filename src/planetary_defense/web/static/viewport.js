@@ -51,7 +51,11 @@ export class Viewport {
 
   renderTelemetry(d) {
     const o = d.orbit, a = d.latest_approach, next = d.next_predicted_approach;
-    clear(this.title, d.name, d.watched ? el("span", { class: "star", title: "On the watchlist" }, " ★") : null);
+    clear(this.title, el("span", { class: "vp-name" }, d.name),
+      d.watched ? el("span", { class: "star", title: "On the watchlist" }, " ★") : null,
+      el("span", { class: "vp-sub" }, badge(d.alert_level),
+        d.is_potentially_hazardous ? el("span", { class: "pha-tag" }, "Potentially hazardous") : null,
+        a ? ` Latest pass ${a.date} · ${ld(a.miss_distance_ld)}` : " No recorded pass"));
     const rows = [
       ["Object ID", d.neo_reference_id],
       ["Alert", badge(d.alert_level)],
@@ -69,7 +73,6 @@ export class Viewport {
       ["Earth MOID", o.tracked ? (o.moid_ld === null ? na() : `${o.moid_ld.toFixed(2)} LD`) : UNTRACKED()],
     ];
     clear(this.telemetry,
-      el("div", {}, d.is_potentially_hazardous ? el("span", { class: "pha-tag" }, "POTENTIALLY HAZARDOUS") : null),
       el("dl", { class: "kv" }, rows.flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)])),
       o.tracked ? null : el("p", { class: "callout" }, "No cached orbit: the viewport shows an approximate straight-line pass. ",
         "Opening it asks NASA once and caches the orbit."));

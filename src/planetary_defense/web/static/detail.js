@@ -23,12 +23,12 @@ function orbitSketch(o) {
   const R = Math.max(a * (1 + e), 1) * 1.18, b = a * Math.sqrt(1 - e * e), theta = (node + peri) % 360;
   return svg("svg", { class: "orbit-svg", viewBox: `${-R} ${-R} ${2 * R} ${2 * R}`, role: "img",
     "aria-label": `Orbit sketch: semi-major axis ${a.toFixed(2)} AU, eccentricity ${e.toFixed(2)}` },
-    svg("circle", { cx: 0, cy: 0, r: 1, fill: "none", stroke: "#56a8f5", "stroke-dasharray": "0.03 0.03",
+    svg("circle", { cx: 0, cy: 0, r: 1, fill: "none", stroke: "#8ec5ff", "stroke-dasharray": "0.03 0.03",
       "stroke-width": R / 120 }),
-    svg("ellipse", { cx: -a * e, cy: 0, rx: a, ry: b, fill: "none", stroke: "#22d3c5", "stroke-width": R / 70,
+    svg("ellipse", { cx: -a * e, cy: 0, rx: a, ry: b, fill: "none", stroke: "#f3c46b", "stroke-width": R / 70,
       transform: `rotate(${-theta})` }),
-    svg("circle", { cx: 0, cy: 0, r: R / 28, fill: "#f2c94c" }),
-    svg("text", { x: 0, y: -1.06, "text-anchor": "middle", fill: "#56a8f5", "font-size": R / 12 }, "Earth's orbit"),
+    svg("circle", { cx: 0, cy: 0, r: R / 28, fill: "#fff1c9", style: "filter: drop-shadow(0 0 6px #ffd66b)" }),
+    svg("text", { x: 0, y: -1.06, "text-anchor": "middle", fill: "#8ec5ff", "font-size": R / 12 }, "Earth's orbit"),
   );
 }
 

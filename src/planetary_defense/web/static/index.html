@@ -4,44 +4,46 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ASTRAEA Command</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='6' fill='%2322d3c5'/%3E%3Cellipse cx='16' cy='16' rx='14' ry='6' fill='none' stroke='%2322d3c5' stroke-width='2' transform='rotate(-25 16 16)'/%3E%3C/svg%3E">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='6' fill='%238ec5ff'/%3E%3Cellipse cx='16' cy='16' rx='14' ry='6' fill='none' stroke='%238ec5ff' stroke-width='2' transform='rotate(-25 16 16)'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="app.css">
   <script type="module" src="app.js"></script>
 </head>
 <body>
   <a class="skip" href="#table">Skip to the objects table</a>
+  <div class="horizon" aria-hidden="true"></div>
   <header class="topbar">
-    <div class="brand"><span class="logo" aria-hidden="true"></span><b>ASTRAEA</b> Planetary Defense Command</div>
+    <div class="brand"><span class="logo" aria-hidden="true"></span><b>ASTRAEA</b><span class="sub">Planetary Defense Command</span></div>
     <div class="topbar-right">
       <span id="api-status" class="pill" role="status">connecting…</span>
       <span id="clock" class="pill mono" aria-label="UTC time"></span>
-      <button id="help-btn" class="btn ghost" type="button" title="Keyboard shortcuts (?)">⌨ Shortcuts</button>
     </div>
   </header>
 
   <main>
     <section id="kpis" class="kpis" aria-label="Key figures"></section>
 
-    <section class="stage" aria-label="Tracked object">
-      <div class="panel viewport-panel">
-        <div class="panel-head">
-          <h2>3D Space Viewport</h2>
-          <div class="vp-controls">
-            <div id="vp-pass" class="segmented small" role="radiogroup" aria-label="Which pass to draw">
-              <label><input type="radio" name="vp-pass" value="latest" checked>Latest pass</label>
-              <label><input type="radio" name="vp-pass" value="next">Next predicted</label>
-            </div>
-            <button id="vp-inspect" class="btn small" type="button" title="Open the detail drawer">Inspect</button>
-          </div>
+    <section class="hero" aria-label="Tracked object">
+      <div class="hero-head">
+        <div>
+          <div class="eyebrow">3D Space Viewport · tracking</div>
+          <h1 id="vp-title" class="vp-title">Choose an object</h1>
         </div>
+        <div class="vp-controls">
+          <div id="vp-pass" class="segmented" role="radiogroup" aria-label="Which pass to draw">
+            <label><input type="radio" name="vp-pass" value="latest" checked>Latest pass</label>
+            <label><input type="radio" name="vp-pass" value="next">Next predicted</label>
+          </div>
+          <button id="vp-inspect" class="btn" type="button" title="Open the detail drawer (Enter)">Inspect</button>
+        </div>
+      </div>
+      <div class="hero-stage">
         <iframe id="vp-frame" class="vp-frame" title="3D Space Viewport"></iframe>
-        <p class="muted vp-hint">Click a row, a dot or a watchlist entry to track it · <kbd>v</kbd> tracks the selected row · drag to rotate, scroll to zoom</p>
+        <aside class="telemetry-card" aria-label="Orbital telemetry">
+          <div class="eyebrow">Orbital telemetry</div>
+          <div id="telemetry"></div>
+        </aside>
       </div>
-      <div class="panel telemetry-panel">
-        <div class="panel-head"><h2>Orbital Telemetry</h2></div>
-        <div id="vp-title" class="vp-title"></div>
-        <div id="telemetry"></div>
-      </div>
+      <p class="vp-hint">Click a row, a dot or a watchlist entry to track it · <kbd>v</kbd> tracks the selected row · drag to rotate, scroll to zoom</p>
     </section>
 
     <div class="layout">
@@ -112,6 +114,17 @@
       </aside>
     </div>
   </main>
+
+  <nav class="dock" aria-label="Quick actions">
+    <button id="dock-home" class="orb" type="button" title="Back to the top" aria-label="Back to the top">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 11.5 12 5l8 6.5V20h-5.5v-5h-5v5H4z"/></svg></button>
+    <button id="dock-search" class="orb" type="button" title="Search ( / )" aria-label="Search">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 5 5"/></svg></button>
+    <button id="dock-watch" class="orb accent" type="button" title="Add to the watchlist ( w )" aria-label="Add to the watchlist">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 4 2.4 5 5.4.6-4 3.7 1.1 5.4L12 16l-4.9 2.7 1.1-5.4-4-3.7 5.4-.6z"/></svg></button>
+    <button id="help-btn" class="orb" type="button" title="Keyboard shortcuts ( ? )" aria-label="Keyboard shortcuts">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+  </nav>
 
   <div id="compare" class="compare" aria-live="polite" hidden></div>
   <aside id="drawer" class="drawer" aria-label="Object detail" aria-hidden="true" tabindex="-1"></aside>
