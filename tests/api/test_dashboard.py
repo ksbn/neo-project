@@ -50,3 +50,10 @@ def test_api_text_never_goes_into_innerHTML():
 def test_static_files_ship_with_the_package():
     pyproject = (Path(__file__).resolve().parents[2] / "pyproject.toml").read_text()
     assert '"planetary_defense.web" = ["static/*"]' in pyproject
+
+
+def test_browsers_recheck_the_dashboard_after_an_update(api):
+    """Without Cache-Control browsers guess a lifetime and keep a stale app.css after a redesign."""
+    for path in ("/", "/app.css", "/app.js", "/viewport.html?id=1", "/viewport-scene.js"):
+        assert api.client.get(path).headers["Cache-Control"] == "no-cache", path
+    assert api.client.get("/app.css").headers.get("ETag")  # so an unchanged file is a cheap 304

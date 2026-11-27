@@ -3,7 +3,9 @@
 
 import { el, svg, clear } from "./dom.js";
 
-const COLORS = { info: "#56a8f5", watch: "#f2c94c", warning: "#f2994a", critical: "#eb5757" };
+// The glass palette (app.css :root): ice blue, warm yellow, amber, coral; quiet objects are soft white.
+const COLORS = { info: "#8ec5ff", watch: "#ffd66b", warning: "#ffad5c", critical: "#ff6b7a" };
+const QUIET = "#dbe7ff";
 const PAD = { left: 46, right: 12, top: 10, bottom: 24 };
 const DAY = 86_400_000;
 
@@ -64,7 +66,7 @@ export class ApproachMap {
     root.append(grid, axis);
     if (1 >= 10 ** y0 && 1 <= 10 ** y1) {  // the Moon's distance
       root.append(svg("line", { class: "ld1", x1: PAD.left, x2: width - PAD.right, y1: sy(1), y2: sy(1) }),
-        svg("text", { x: width - PAD.right - 2, y: sy(1) - 3, "text-anchor": "end", fill: "#eb5757", "font-size": 10 }, "Moon · 1 LD"));
+        svg("text", { x: width - PAD.right - 2, y: sy(1) - 3, "text-anchor": "end", fill: "#ff6b7a", "font-size": 10 }, "Moon · 1 LD"));
     }
 
     // brush layer (behind dots)
@@ -101,7 +103,7 @@ export class ApproachMap {
       const dot = svg("circle", {
         class: ["dot", o.is_potentially_hazardous && "pha", o.neo_reference_id === this.hotId && "hot"],
         cx: sx(Date.parse(a.date)), cy: sy(a.miss_distance_ld), r,
-        fill: COLORS[o.alert_level] ?? "#22d3c5", dataset: { id: o.neo_reference_id },
+        fill: COLORS[o.alert_level] ?? QUIET, dataset: { id: o.neo_reference_id },
         tabindex: 0, role: "button", "aria-label": `${o.name}, ${a.miss_distance_ld.toFixed(2)} lunar distances on ${a.date}`,
       });
       const show = () => {

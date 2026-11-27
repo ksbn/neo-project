@@ -119,7 +119,7 @@ function renderSummary(s) {
     role: "img", "aria-label": "Approaches per day, last 14 days" },
     days.map((d, i) => {
       const h = Math.max(1.5, (d.count / peak) * 36);
-      const bar = svg("rect", { x: i * 10 + 1, y: 40 - h, width: 8, height: h, rx: 1.5, fill: d.count ? "#22d3c5" : "#1f3f4a" },
+      const bar = svg("rect", { x: i * 10 + 1, y: 40 - h, width: 8, height: h, rx: 1.5, fill: d.count ? "#8ec5ff" : "rgba(255,255,255,0.12)" },
         svg("title", {}, `${d.date}: ${d.count} approaches · click to filter`));
       bar.addEventListener("click", () => setFilters({ approach_from: d.date, approach_to: d.date }));
       return bar;
@@ -132,9 +132,9 @@ function renderSummary(s) {
       el("div", { class: "big", style: { color: worst ? `var(--${worst})` : "var(--ok)" } }, worst ? worst.toUpperCase() : "QUIET"),
       el("div", { class: "sevbar", role: "group", "aria-label": "Objects by alert level" },
         SEVERITIES.filter((k) => counts[k]).map((k) => el("button", { type: "button", title: `${counts[k]} ${k}: show ${k}+`,
-          style: { flex: counts[k], background: `var(--${k})` }, onclick: () => setFilters({ min_severity: k }) }))),
+          style: { flex: counts[k], background: `var(--${k})`, color: `var(--${k})` }, onclick: () => setFilters({ min_severity: k }) }))),
       el("div", { class: "sevlegend" }, SEVERITIES.map((k) => el("button", { type: "button", onclick: () => setFilters({ min_severity: k }) },
-        el("i", { style: { background: `var(--${k})` } }), `${k} ${counts[k]}`)))),
+        el("i", { style: { background: `var(--${k})`, color: `var(--${k})` } }), `${k} ${counts[k]}`)))),
     el("div", { class: "kpi" }, el("h3", {}, "Objects tracked"),
       el("div", { class: "big" }, s.total_objects.toLocaleString(LOCALE)),
       el("div", { class: "sub" }, el("button", { class: "kpi-link", type: "button", onclick: () => setFilters({ hazardous: true }) },
@@ -232,7 +232,7 @@ function renderTable() {
       el("td", { class: "name-cell", title: o.name }, o.name, o.is_potentially_hazardous ? el("span", { class: "pha-tag" }, "PHA") : null),
       el("td", {}, a ? [a.date, el("span", { class: "muted" }, ` · ${relativeDays(a.date)}`)] : na("—")),
       el("td", { class: "num" }, a ? [el("span", { class: "distbar", style: { width: `${Math.max(3, 46 * Math.log10(1 + a.miss_distance_ld) / Math.log10(1 + maxLd))}px`,
-        background: a.miss_distance_ld < 1 ? "var(--critical)" : a.miss_distance_ld <= 5 ? "var(--warning)" : "var(--accent)" } }), ld(a.miss_distance_ld)] : na("—")),
+        background: "currentColor", color: a.miss_distance_ld < 1 ? "var(--critical)" : a.miss_distance_ld <= 5 ? "var(--warning)" : "var(--accent)" } }), ld(a.miss_distance_ld)] : na("—")),
       el("td", { class: "num" }, a ? `${a.relative_velocity_km_s.toFixed(1)} km/s` : na("—")),
       el("td", { class: "num" }, metres(o.estimated_diameter_max_m)),
       el("td", {}, badge(o.alert_level)));
@@ -442,6 +442,13 @@ window.addEventListener("popstate", () => { readUrl(); syncControls(); loadObjec
 document.addEventListener("keydown", onKey);
 $("#help-btn").addEventListener("click", () => $("#help-dialog").showModal());
 $("#watch-new").addEventListener("click", () => form.open());
+// The dock: round glass buttons for the main actions (each also has a key).
+$("#dock-home").addEventListener("click", () => window.scrollTo({ top: 0, behavior: "smooth" }));
+$("#dock-search").addEventListener("click", () => { $("#q").scrollIntoView({ block: "center", behavior: "smooth" }); $("#q").focus(); });
+$("#dock-watch").addEventListener("click", () => {
+  const item = state.items[state.cursor] ?? state.items.find((o) => o.neo_reference_id === viewport.id);
+  form.open(item ? { neoId: item.neo_reference_id, name: item.name } : {});
+});
 
 readUrl();
 buildFilters();
