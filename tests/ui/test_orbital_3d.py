@@ -128,14 +128,15 @@ def test_inspector_payload_uses_the_latest_pass_or_today():
 
 
 
-def test_sparkline_scales_values_into_the_box():
-    from planetary_defense.ui.components.kpi_strip import sparkline_svg
+def test_sparkline_bars_scale_to_the_busiest_day():
+    import re
 
-    svg = sparkline_svg([1, 5, 3], width=100, height=20)
-    points = [tuple(map(float, p.split(","))) for p in svg.split('<polyline points="')[1].split('"')[0].split()]
-    assert [x for x, _ in points] == [0.0, 50.0, 100.0]
-    assert min(y for _, y in points) == 3.0 and max(y for _, y in points) == 17.0  # 3 px margins
-    assert "<line" in sparkline_svg([4])  # one point: a flat line, no division by zero
+    from planetary_defense.ui.components.kpi_strip import sparkline_bars
+
+    heights = [int(h) for h in re.findall(r"height:(\d+)%", sparkline_bars([1, 5, 0, 3]))]
+    assert heights == [20, 100, 6, 60]  # an empty day keeps a visible hairline
+    assert "<i" not in sparkline_bars([])  # no data, no bars, no division by zero
+    assert re.findall(r"height:(\d+)%", sparkline_bars([0, 0])) == ["6", "6"]
 
 
 def test_context_arcs_use_only_cached_orbits_of_other_asteroids():

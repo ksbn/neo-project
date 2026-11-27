@@ -3,7 +3,7 @@
 Each pass is scored by the same anomaly rules as recorded ones, so a close or
 hazardous pass is flagged before it happens. Only asteroids with a cached orbit
 are covered (the pipeline caches the orbits of every asteroid it ingests); the
-caption says how many. The ▸ button makes the asteroid the tracked one.
+caption says how many. The crosshair button makes the asteroid the tracked one.
 """
 
 from __future__ import annotations
@@ -107,8 +107,8 @@ def render(view: AsteroidView, today: date | None = None) -> None:
         with line:
             st.html(pass_row(p, worst.get((p.neo_reference_id, p.approach.close_approach_date)), today))
         with action:
-            st.button("▸", key=f"upcoming_{i}_{p.neo_reference_id}", on_click=select, args=(p.neo_reference_id,),
-                      help=f"Track {p.name}")
+            st.button("", icon=":material/my_location:", key=f"upcoming_{i}_{p.neo_reference_id}", on_click=select,
+                      args=(p.neo_reference_id,), help=f"Track {p.name}")
     more = f" (+ {len(passes) - MAX_ROWS} more)" if len(passes) > MAX_ROWS else ""
     st.caption(f"{len(passes)} predicted Earth passes {horizon.lower()}{more} · "
                f"covers the {covered} asteroids with a cached orbit and a pass in the next 10 years")

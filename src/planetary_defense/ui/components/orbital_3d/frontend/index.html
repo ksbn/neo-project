@@ -5,26 +5,33 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Orbital viewport</title>
 <style>
-  :root { --bg: #040a10; --panel: rgba(10, 22, 32, 0.86); --text: #dbe7ee; --muted: #8ea3b0; --accent: #3fd0c9; }
+  /* Glass over deep space: matches ui/theme.py (ice-blue accent, hairline borders, pills). */
+  :root { --bg: #050912; --panel: rgba(22, 32, 60, 0.42); --line: rgba(255, 255, 255, 0.14);
+          --text: #eef3ff; --muted: rgba(226, 234, 255, 0.6); --accent: #8ec5ff; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
-               font: 12px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+               font: 12px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
+               -webkit-font-smoothing: antialiased; }
   /* The legend is a strip under the canvas, never on top of the drawing. */
   #stage { display: flex; flex-direction: column; width: 100%; height: 100vh; overflow: hidden; }
   #viewport { position: relative; flex: 1; min-height: 0; }
   #viewport canvas { display: block; }
-  .panel { position: absolute; background: var(--panel); border: 1px solid rgba(111, 227, 255, 0.18);
-           border-radius: 6px; padding: 4px; }
+  .panel { position: absolute; background: var(--panel); border: 1px solid var(--line); border-radius: 999px;
+           padding: 4px; -webkit-backdrop-filter: blur(18px) saturate(160%); backdrop-filter: blur(18px) saturate(160%);
+           box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 8px 24px rgba(0, 0, 0, 0.35); }
   .tools { top: 10px; display: flex; gap: 4px; }
   #modes { left: 10px; } #zoom { right: 10px; }
-  .tools button { background: transparent; color: var(--text); border: 1px solid rgba(255,255,255,0.12);
-                  border-radius: 5px; padding: 3px 9px; font: inherit; cursor: pointer; min-width: 28px; }
-  .tools button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #032024; }
-  .tools button:hover { border-color: var(--accent); }
+  .tools button { background: transparent; color: var(--text); border: 1px solid transparent;
+                  border-radius: 999px; padding: 4px 12px; font: inherit; font-weight: 500; cursor: pointer;
+                  min-width: 30px; transition: background .2s, border-color .2s; }
+  .tools button[aria-pressed="true"] { background: var(--accent); color: #061022;
+                                       box-shadow: 0 0 14px rgba(142, 197, 255, 0.45); }
+  .tools button:hover { border-color: rgba(142, 197, 255, 0.55); }
+  .tools button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   .tools button:disabled { opacity: 0.35; cursor: not-allowed; }
-  #legend { flex: none; padding: 6px 10px; font-size: 11px; color: var(--text);
-            border-top: 1px solid rgba(111, 227, 255, 0.15); background: #071119; max-height: 30vh; overflow: auto; }
+  #legend { flex: none; padding: 8px 14px; font-size: 11px; color: var(--text);
+            border-top: 1px solid var(--line); background: rgba(10, 16, 34, 0.9); max-height: 30vh; overflow: auto; }
   #legend .muted { color: var(--muted); }
-  #notice { inset: 0; display: grid; place-items: center; text-align: center; padding: 24px;
+  #notice { inset: 0; display: grid; place-items: center; text-align: center; padding: 24px; border-radius: 0;
             background: var(--bg); color: var(--muted); }
   #notice[hidden] { display: none; }
 </style>

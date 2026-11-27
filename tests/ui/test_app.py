@@ -36,12 +36,12 @@ def page_html(at: AppTest) -> str:
 
 def test_kpi_strip_has_the_four_cards_from_stored_data():
     text = page_html(run())
-    for title in ("Threat Level:", "Near-Earth Objects (NEOs)", "Close Approaches (24h):", "Global Defense Readiness:"):
+    for title in ("Threat Level", "Near-Earth Objects (NEOs)", "Close Approaches (24h)", "Global Defense Readiness"):
         assert title in text
-    assert ">3<" in text  # tracked NEOs
-    assert "<polyline" in text  # the approaches-per-day sparkline
-    assert "Guarded (Level 3)" in text  # worst alert within +-7 days of the fake's dates is a watch
-    assert "Operational (Green)" in text and "Last sync: 2026-11-22 08:00 UTC" in text
+    assert ">3<small>tracked</small>" in text  # tracked NEOs
+    assert text.count('class="astraea-bars"') == 1 and text.count("height:") >= 5  # approaches per day
+    assert ">Guarded</span><small>Level 3</small>" in text  # worst alert within +-7 days of the fake's dates
+    assert "Operational<small>Green</small>" in text and "Last sync: 2026-11-22 08:00 UTC" in text
 
 
 def test_healthy_runs_need_no_banner_and_hazard_alerts_filter():

@@ -158,7 +158,7 @@ def render(view: AsteroidView, data: DashboardData, today: date | None = None) -
     now = datetime.now(UTC)
     today = today or now.date()
 
-    with st.container(border=True):
+    with st.container(border=True, key="panel_viewport"):
         title, picker = st.columns([2, 3], vertical_alignment="center")
         with title:
             st.html('<div class="astraea-panel-title" style="border:0;margin:0">3D Space Viewport</div>')
@@ -187,7 +187,7 @@ def render(view: AsteroidView, data: DashboardData, today: date | None = None) -
         elif lookup is not None and lookup.note:
             st.caption(lookup.note)
 
-    with st.container(border=True):
+    with st.container(border=True, key="panel_telemetry"):
         st.html('<div class="astraea-panel-title">Orbital Telemetry Readouts <span class="chev">⌄</span></div>')
         st.html(telemetry_html(neo_id, names[neo_id], row, lookup, today))
 

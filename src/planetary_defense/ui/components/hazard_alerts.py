@@ -1,4 +1,4 @@
-"""Hazard Alerts rows (top of the left panel). The ▸ button makes the asteroid the tracked one."""
+"""Hazard Alerts rows (top of the left panel). The crosshair button makes the asteroid the tracked one."""
 
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ def render(view: AsteroidView, today: date | None = None) -> None:
         with line:
             st.html(alert_row(alert, rows.get(alert.neo_reference_id)))
         with action:
-            st.button("▸", key=f"track_{i}_{alert.neo_reference_id}_{alert.rule}", on_click=select,
-                      args=(alert.neo_reference_id,), help=f"Track {alert.name}")
+            st.button("", icon=":material/my_location:", key=f"track_{i}_{alert.neo_reference_id}_{alert.rule}",
+                      on_click=select, args=(alert.neo_reference_id,), help=f"Track {alert.name}")
     if len(shown) > MAX_ROWS:
         st.caption(f"+ {len(shown) - MAX_ROWS} more {floor.name.lower()}-or-worse alerts")

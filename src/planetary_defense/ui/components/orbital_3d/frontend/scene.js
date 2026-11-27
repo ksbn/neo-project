@@ -28,7 +28,7 @@ try {
   throw error;
 }
 
-const PALETTE = { teal: 0x3fd0c9, ring: 0x6fe3ff, selected: payload.hazardous ? 0xff6b3d : 0xffa24a };
+const PALETTE = { teal: 0x8ec5ff, ring: 0x9fd0ff, selected: payload.hazardous ? 0xff7a5c : 0xf3c46b };  // ice blue, gold (theme.py)
 const CONTEXT_COLORS = [0xf2c94c, 0xf2994a, 0x9b8cff, 0x56ccf2, 0x6fcf97, 0xff7aa2];
 const ecl = ([x, y, z]) => new THREE.Vector3(x, z, -y);
 const fmt = (value, digits = 2) => Number(value).toFixed(digits);
