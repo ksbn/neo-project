@@ -62,6 +62,17 @@ STATIC: Final = Path(__file__).resolve().parent.parent / "web" / "static"
 _REQUEST_ID: Final = re.compile(r"^[A-Za-z0-9_.-]{8,64}$")
 
 ConnectionFactory = Callable[[], AbstractContextManager[psycopg.Connection]]
+
+#: Browsers must re-check the dashboard's files on every load (cheap: an unchanged file is a 304 via its ETag);
+#: without it they guess a freshness lifetime and keep serving a stale app.css after an update.
+REVALIDATE: Final = {"Cache-Control": "no-cache"}
+
+
+class RevalidatedStaticFiles(StaticFiles):
+    def file_response(self, *args: Any, **kwargs: Any) -> Response:
+        response = super().file_response(*args, **kwargs)
+        response.headers.update(REVALIDATE)
+        return response
 OrbitSourceFactory = Callable[[], AbstractContextManager[OrbitSource]]
 
 
@@ -245,15 +256,15 @@ def create_app(
         """The 3D scene page; web/static/viewport-boot.js loads its geometry from GET /objects/{id}/trajectory."""
         page = INDEX_HTML.read_text("utf-8").replace("__THREE_VERSION__", THREE_VERSION)
         page = page.replace("__SCENE_JS__", 'import "./viewport-boot.js";').replace("__PAYLOAD__", "null")
-        return HTMLResponse(page)
+        return HTMLResponse(page, headers=REVALIDATE)
 
     @app.get("/viewport-scene.js", include_in_schema=False)
     def viewport_scene() -> Response:
         return Response(SCENE_JS.read_text("utf-8").replace("__TEXTURE_BASE__", TEXTURE_BASE),
-                        media_type="text/javascript")
+                        media_type="text/javascript", headers=REVALIDATE)
 
     if STATIC.is_dir():
-        app.mount("/", StaticFiles(directory=STATIC, html=True), name="dashboard")
+        app.mount("/", RevalidatedStaticFiles(directory=STATIC, html=True), name="dashboard")
     return app
 
 
