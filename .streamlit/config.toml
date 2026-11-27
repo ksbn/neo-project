@@ -1,11 +1,19 @@
-# ASTRAEA control-room theme (dark teal/slate). Fine-grained styling lives in src/planetary_defense/ui/theme.py.
+# ASTRAEA "glass over deep space" theme. The glass panels, sky and type details live in
+# src/planetary_defense/ui/theme.py; these are the base values Streamlit's own widgets use.
 [theme]
 base = "dark"
-primaryColor = "#3fd0c9"
-backgroundColor = "#081219"
-secondaryBackgroundColor = "#0f1e29"
-textColor = "#dbe7ee"
-font = "sans serif"
+primaryColor = "#8ec5ff"
+backgroundColor = "#050912"
+secondaryBackgroundColor = "#141d38"
+textColor = "#eef3ff"
+font = "-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Inter', 'Segoe UI', system-ui, sans-serif"
+headingFont = "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', 'Segoe UI', system-ui, sans-serif"
+baseRadius = "14px"
+buttonRadius = "full"
+borderColor = "#26314f"
+dataframeBorderColor = "#1d2744"
+dataframeHeaderBackgroundColor = "#111a33"
+showWidgetBorder = true
 
 [client]
 # No "Deploy" / developer toolbar over the command header, and no sidebar navigation.

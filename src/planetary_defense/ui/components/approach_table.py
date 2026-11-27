@@ -38,9 +38,9 @@ def to_frame(rows: list[AsteroidSummary]) -> pd.DataFrame:
 
 
 TIER_STYLES = {
-    "critical": f"background-color: {PALETTE['critical']}; color: #ffffff; font-weight: 700",
-    "warning": f"background-color: {PALETTE['watch']}; color: #1b1300; font-weight: 700",
-    "nominal": "background-color: #12343d; color: #8fe8df",
+    "critical": f"background-color: rgba(255, 107, 122, 0.22); color: {PALETTE['critical']}; font-weight: 700",
+    "warning": f"background-color: rgba(255, 173, 92, 0.18); color: {PALETTE['warning']}; font-weight: 700",
+    "nominal": f"color: {PALETTE['accent']}",
 }
 
 

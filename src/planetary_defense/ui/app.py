@@ -7,7 +7,7 @@ so tests can render it with an in-memory fake. Components live in ``ui/component
 Started by the root ``app.py``.
 """
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 
 import streamlit as st
 
@@ -210,12 +210,12 @@ def render_diagnostics(result: LoadResult) -> None:
                 st.caption(msg)
 
 
-def render_status(view: AsteroidView) -> None:
+def render_status(view: AsteroidView, now: datetime) -> None:
     """A banner only when something needs attention; the readiness card shows the healthy state."""
     if not view.history_available:
         st.info("Showing live NASA data: the database is unavailable, so alerts are scored on the fly.")
         return
-    health = run_health(view.status, datetime.now(UTC))
+    health = run_health(view.status, now)
     if health.level != "success":
         getattr(st, health.level)(health.text)
 
@@ -240,16 +240,18 @@ def render(data: DashboardData, today: date | None = None) -> None:
         return
 
     view = result.view
-    kpi_strip.render(view, today)
-    render_status(view)
+    # A pinned day (tests) also pins the clock, so "how fresh is the data" doesn't drift with real time.
+    now = datetime.combine(today, time(12, tzinfo=UTC)) if today is not None else datetime.now(UTC)
+    kpi_strip.render(view, today, now)
+    render_status(view, now)
     left, right = st.columns([5, 6], gap="medium")
-    with left, st.container(border=True):
+    with left, st.container(border=True, key="panel_alerts"):
         panel_title("Asteroid Hazard Alerts &amp; Close Approaches")
         hazard_alerts.render(view)
         approach_table.render(view)
     with right:
         orbit_stage.render(view, data, today)
-        with st.container(border=True):
+        with st.container(border=True, key="panel_upcoming"):
             upcoming_approaches.render(view, today)
     render_diagnostics(result)
 

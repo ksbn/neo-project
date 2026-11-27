@@ -18,7 +18,7 @@ def header_html(result: LoadResult, now: datetime) -> str:
     status, level = feed_status(result.source, history)
     color = PALETTE[level]
     return f"""<div class="astraea-header">
-      <div class="astraea-title"><b>ASTRAEA:</b> Planetary Defense Command</div>
+      <div class="astraea-title"><b>ASTRAEA</b><span class="sub">Planetary Defense Command</span></div>
       <div class="astraea-profile">
         <div class="astraea-avatar">OP</div>
         <div><div class="who">Global Profile</div>
@@ -34,7 +34,7 @@ def render(result: LoadResult, data: DashboardData) -> None:
     with title:
         st.html(header_html(result, datetime.now(UTC)))
     with action:
-        if st.button("⟳ Sync", key="sync_feed", width="stretch",
+        if st.button("⟳  Sync", key="sync_feed", width="stretch",
                      help="Sync / refresh feed: fetch the last 3 days from NASA now (uses NASA_API_KEY)"):
             with st.spinner("Syncing with NASA NeoWs..."):
                 st.session_state[SYNC_REPORT] = data.sync()

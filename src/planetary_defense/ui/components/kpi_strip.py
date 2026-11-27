@@ -1,8 +1,10 @@
-"""Top 4-card KPI strip: Threat Level, NEOs (with a line sparkline), Close Approaches (24h), Defense Readiness.
+"""Top 4-card KPI strip: Threat Level, NEOs (with an approaches-per-day sparkline), Close Approaches (24h),
+Defense Readiness.
 
-Drawn in one self-contained iframe because Streamlit's HTML sanitiser drops inline SVG
-(the sparkline). Every figure comes from the already-loaded view (stored data), so the
-strip renders even when a live sync fails. NASA-derived text is HTML-escaped.
+Glass cards rendered inline with ``st.html`` (not an iframe), so the cards really blur the sky
+behind them. Streamlit's sanitiser drops inline SVG, so the sparkline is CSS bars. Every figure
+comes from the already-loaded view (stored data), so the strip renders even when a live sync
+fails. NASA-derived text is HTML-escaped.
 """
 
 from __future__ import annotations
@@ -18,8 +20,7 @@ from planetary_defense.domain.models import AsteroidView, Severity
 from planetary_defense.ui.messages import run_health
 from planetary_defense.ui.theme import PALETTE
 
-HEIGHT: Final = 116
-SEGMENTS: Final = ("#27ae60", "#6fcf97", "#f2c94c", "#f2994a", "#eb5757")
+SEGMENTS: Final = (PALETTE["nominal"], PALETTE["accent"], PALETTE["watch"], PALETTE["warning"], PALETTE["critical"])
 
 #: Threat scale 1..5 from the worst nearby alert.
 THREAT_SCALE: Final = {
@@ -34,14 +35,14 @@ READINESS: Final = {
     "success": ("Operational (Green)", PALETTE["nominal"]),
     "warning": ("Operational (Yellow)", PALETTE["watch"]),
     "error": ("Degraded (Red)", PALETTE["critical"]),
-    "info": ("Standby (Blue)", "#56a8f5"),
+    "info": ("Standby (Blue)", PALETTE["accent"]),
 }
 
 
 def threat(view: AsteroidView, today: date) -> tuple[int, str, str]:
-    """(level 1-5, label, colour) from the worst alert on passes within +-7 days, recorded or predicted."""
+    """(level 1-5, name, colour) from the worst alert on passes within +-7 days, recorded or predicted."""
     level, name = THREAT_SCALE[threat_level([*view.alerts, *view.upcoming_alerts], today)]
-    return level, f"{name} (Level {level})", SEGMENTS[level - 1]
+    return level, name, SEGMENTS[level - 1]
 
 
 def readiness(view: AsteroidView, now: datetime) -> tuple[str, str, str]:
@@ -53,67 +54,47 @@ def readiness(view: AsteroidView, now: datetime) -> tuple[str, str, str]:
     return label, color, f"Last sync: {last.astimezone(UTC):%Y-%m-%d %H:%M} UTC" if last else "No successful sync yet"
 
 
-def sparkline_svg(values: list[int], width: int = 220, height: int = 38, color: str = PALETTE["accent"]) -> str:
-    """A small line chart with a soft fill; a flat line for fewer than two points."""
-    if len(values) < 2:
-        y = height / 2
-        return (f'<svg viewBox="0 0 {width} {height}" preserveAspectRatio="none"><line x1="0" y1="{y}" '
-                f'x2="{width}" y2="{y}" stroke="{color}" stroke-opacity="0.4"/></svg>')
-    top, bottom = max(values), min(values)
-    span = (top - bottom) or 1
-    step = width / (len(values) - 1)
-    pts = [(i * step, height - 3 - (v - bottom) / span * (height - 6)) for i, v in enumerate(values)]
-    line = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
-    area = f"0,{height} {line} {width},{height}"
-    return (f'<svg viewBox="0 0 {width} {height}" preserveAspectRatio="none" role="img" aria-label="trend">'
-            f'<polygon points="{area}" fill="{color}" fill-opacity="0.12"/>'
-            f'<polyline points="{line}" fill="none" stroke="{color}" stroke-width="1.8"/></svg>')
+def sparkline_bars(values: list[int]) -> str:
+    """Approaches per day as CSS bars (heights in % of the busiest day); empty days keep a hairline."""
+    if not values:
+        return '<div class="astraea-bars" aria-hidden="true"></div>'
+    peak = max(values) or 1
+    bars = "".join(f'<i style="height:{max(6, round(v / peak * 100))}%" title="{v}"></i>' for v in values)
+    return f'<div class="astraea-bars" role="img" aria-label="approaches per day">{bars}</div>'
+
+
+def _card(label: str, value: str, sub: str = "", extra: str = "", glow: str = PALETTE["accent"]) -> str:
+    return (f'<div class="astraea-kpi" style="--glow:{glow}2e"><div class="label">{label}</div>'
+            f'<div class="value">{value}</div>{extra}{f"<div class=sub>{sub}</div>" if sub else ""}</div>')
 
 
 def strip_html(view: AsteroidView, today: date, now: datetime) -> str:
-    level, threat_label, threat_color = threat(view, today)
-    segments = "".join(
-        f'<i style="background:{c};opacity:{1 if i < level else 0.25}"></i>' for i, c in enumerate(SEGMENTS)
+    level, threat_name, threat_color = threat(view, today)
+    scale = "".join(
+        f'<i style="background:{c};opacity:{1 if i < level else 0.18};'
+        f'box-shadow:{f"0 0 10px {c}" if i < level else "none"}"></i>'
+        for i, c in enumerate(SEGMENTS)
     )
     window = window_summary(view.rows, today, days=0)
-    closest = (f"Closest today: {window.closest_ld:.2f} LD · {html.escape(window.closest.name)}"
+    closest = (f"Closest today {window.closest_ld:.2f} LD · {html.escape(window.closest.name)}"
                if window.closest is not None and window.closest_ld is not None else "No passes recorded today")
     ready_label, ready_color, ready_detail = readiness(view, now)
+    ready_name, _, ready_tone = ready_label.partition(" (")
     trend = [n for _, n in view.trend]
-    p = PALETTE
-    return f"""<!doctype html><html><head><meta charset="utf-8"><style>
-  body {{ margin:0; background:transparent; font:13px/1.35 system-ui,-apple-system,"Segoe UI",sans-serif;
-          color:{p["text"]}; }}
-  .strip {{ display:grid; grid-template-columns:repeat(4,1fr); gap:14px; }}
-  .card {{ background:{p["panel"]}; border:1px solid {p["border"]}; border-radius:8px; padding:10px 14px;
-           height:{HEIGHT - 24}px; overflow:hidden; }}
-  .t {{ display:flex; justify-content:space-between; font-weight:700; font-size:12.5px; letter-spacing:.03em;
-        text-transform:uppercase; }}
-  .t .i {{ width:16px; height:16px; border-radius:50%; border:1.5px solid {p["accent"]}; color:{p["accent"]};
-           font-size:10px; display:grid; place-items:center; text-transform:none; }}
-  .v {{ font-size:22px; margin-top:4px; }}
-  .s {{ color:{p["muted"]}; font-size:12px; margin-top:2px; white-space:nowrap; overflow:hidden;
-        text-overflow:ellipsis; }}
-  .bar {{ display:flex; gap:4px; margin-top:8px; }} .bar i {{ flex:1; height:5px; border-radius:3px; }}
-  .neo {{ display:flex; align-items:end; gap:10px; }} .neo svg {{ flex:1; height:38px; }}
-  .dot {{ display:inline-block; width:14px; height:14px; border-radius:50%; margin-right:8px; vertical-align:-1px;
-          box-shadow:0 0 10px currentColor; }}
-</style></head><body><div class="strip">
-  <div class="card"><div class="t">Threat Level: <span class="i">i</span></div>
-    <div class="v" style="color:{threat_color}">{threat_label}</div><div class="bar">{segments}</div></div>
-  <div class="card"><div class="t">Near-Earth Objects (NEOs) <span class="i">i</span></div>
-    <div class="neo"><div class="v">Tracked: <span style="color:{p["accent"]}">{view.overview.total:,}</span></div>
-    {sparkline_svg(trend)}</div>
-    <div class="s">{view.overview.hazardous:,} potentially hazardous · approaches/day, {len(trend)} days
-    </div></div>
-  <div class="card"><div class="t">Close Approaches (24h): <span class="i">i</span></div>
-    <div class="v" style="color:{p["accent"]}">{window.count:,}</div><div class="s">{closest}</div></div>
-  <div class="card"><div class="t">Global Defense Readiness: <span class="i">i</span></div>
-    <div class="v" style="color:{ready_color}"><span class="dot" style="color:{ready_color};background:{ready_color}">
-    </span>{ready_label}</div><div class="s">{ready_detail}</div></div>
-</div></body></html>"""
+    dot = f'<span class="astraea-dot" style="color:{ready_color};background:{ready_color}"></span>'
+    cards = [
+        _card("Threat Level", f'<span style="color:{threat_color}">{threat_name}</span><small>Level {level}</small>',
+              extra=f'<div class="astraea-scale">{scale}</div>', glow=threat_color),
+        _card("Near-Earth Objects (NEOs)", f"{view.overview.total:,}<small>tracked</small>",
+              f"{view.overview.hazardous:,} potentially hazardous · approaches/day, {len(trend)} days",
+              extra=sparkline_bars(trend)),
+        _card("Close Approaches (24h)", f'<span style="color:{PALETTE["accent"]}">{window.count:,}</span>', closest),
+        _card("Global Defense Readiness", f"{dot}{ready_name}<small>{ready_tone.rstrip(')')}</small>", ready_detail,
+              glow=ready_color),
+    ]
+    return f'<div class="astraea-kpis">{"".join(cards)}</div>'
 
 
 def render(view: AsteroidView, today: date | None = None, now: datetime | None = None) -> None:
     now = now or datetime.now(UTC)
-    st.iframe(strip_html(view, today or now.date(), now), height=HEIGHT)
+    st.html(strip_html(view, today or now.date(), now))
